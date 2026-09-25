@@ -227,6 +227,28 @@ async function main() {
     assert(!sarah, 'Sarah (Head of Marketing) NOT fabricated');
   });
 
+  // 5b. PEOPLE EXTRACTION — never fabricate "Use Case Ve", "Mark Hawkins Dire", "Docs Dire"
+  await runTest('people extraction — no false-positive names (Use Case Ve / Mark Hawkins Dire / Docs Dire)', () => {
+    const html = `<html><body>
+<section><h2>Use Case</h2><p>Ve — CTO</p><p>Jane Roe — Director of Data Platform</p></section>
+<nav><a href="/docs">Docs</a> — Dire</nav>
+<section class="team"><h3>Team</h3><p>Mark Hawkins — Director of Engineering</p></section>
+</body></html>`;
+    const pages: DiscoveredPage[] = [
+      { url: 'https://acme.com/team', path: '/team', category: 'team_people' },
+      { url: 'https://acme.com/docs', path: '/docs', category: 'docs' }
+    ];
+    const cands = PeopleExtractor.extractFromPages(pages, new Map([
+      ['https://acme.com/team', html], ['https://acme.com/docs', html]
+    ]), { company: 'acme.com' });
+    const names = cands.map(c => c.name);
+    const roles = cands.map(c => c.role);
+    assert(!names.some(n => /^Use Case/.test(n) || /Dire$/i.test(n) || n === 'Docs Dire'),
+      `no fabricated names like "Use Case Ve"/"Docs Dire" (got ${JSON.stringify(names)})`);
+    assert(!roles.some(r => r === 'Dire'), `no truncated role "Dire" (got ${JSON.stringify(roles)})`);
+    assert(cands.every(c => c.confidence === 'HIGH'), 'all people-context candidates are HIGH');
+  });
+
   // 6. OWNER SELECTION — evidence string uses "is listed as"
   await runTest('owner selection — explicit candidate -> HIGH evidence string', () => {
     const sel = OwnerSelector.select([janeCandidate], 'api surface');
@@ -332,8 +354,8 @@ async function main() {
       finding: { finding_type: 'POSSIBLE_SENSITIVE_METADATA_EXPOSURE', impact_severity: 'MEDIUM', severity_basis: 'x' },
       evidence: goEvidence
     } as IcpContext);
-    assert(q.overall === 'PASS', `full context -> PASS (got ${q.overall})`);
-    assert(q.fit === 'STRONG', 'PASS implies STRONG fit');
+    assert(q.overall === 'OUTREACH_READY', `full context -> OUTREACH_READY (got ${q.overall})`);
+    assert(q.fit === 'STRONG', 'OUTREACH_READY implies STRONG fit');
   });
 
   // 12. ICP QUALIFICATION — RESEARCH_MORE (signals+owner, no contact, no defensible finding)
@@ -371,7 +393,7 @@ async function main() {
     });
     const { prospect, case_ref } = await builder.build('https://acme.com');
 
-    assert(prospect.decision === 'READY', `deep decision READY (got ${prospect.decision})`);
+    assert(prospect.decision === 'OUTREACH_READY', `deep decision OUTREACH_READY (got ${prospect.decision})`);
     assert(prospect.confidence === 'HIGH', 'READY -> HIGH confidence');
     assert(prospect.fit !== 'POOR', 'fit is not poor');
     assert(!!case_ref, 'engine case_ref produced by GO run');
@@ -461,7 +483,7 @@ async function main() {
     await op.start();
     const out = c.text();
     assert(out.includes('DEEP INTELLIGENCE'), 'banner/help shown');
-    assert(out.includes('Deep decision: READY'), 'deep decision READY printed');
+    assert(out.includes('Deep decision: OUTREACH_READY'), 'deep decision OUTREACH_READY printed');
     assert(out.includes('DEEP PROSPECT DOSSIER'), 'show all prints full dossier');
     assert(out.includes('Jane Doe'), 'dossier includes resolved owner Jane Doe');
     assert(out.includes('NEVER AUTO-SENT'), 'show all reminds never-auto-send');
@@ -483,7 +505,7 @@ async function main() {
     await op.start();
     const out = c.text();
     assert(out.includes('Send requires explicit confirmation'), 'send without --confirm is refused');
-    assert(out.includes('Send blocked: decision is not GO'), 'send --confirm on NO_GO is blocked');
+    assert(out.includes('Send blocked: decision is not OUTREACH_READY'), 'send --confirm on non-OUTREACH_READY is blocked');
   });
 
   // 18. BATCH MODE — deep file <csv> + summary artifact
@@ -503,7 +525,7 @@ async function main() {
     });
     await op.start();
     const out = c.text();
-    assert(out.includes('READY'), 'batch produced READY results');
+    assert(out.includes('OUTREACH_READY'), 'batch produced OUTREACH_READY results');
     assert(out.includes('total →'), 'batch summary line printed');
     // summary artifact persisted
     const deepDir = path.join(tmpDir, 'artifacts', 'intelligence', 'deep');
@@ -511,11 +533,11 @@ async function main() {
     assert(batchFiles.length >= 1, 'batch summary artifact persisted');
     const summary = JSON.parse(fs.readFileSync(path.join(deepDir, batchFiles[0]), 'utf8'));
     assert(summary.total === 2, `batch total is 2 (got ${summary.total})`);
-    assert(summary.ready === 2, `batch ready is 2 (got ${summary.ready})`);
+    assert(summary.outreach_ready === 2, `batch outreach_ready is 2 (got ${summary.outreach_ready})`);
     assert(summary.no_go === 0, 'batch no_go is 0');
     assert(Array.isArray(summary.top_reasons_for_rejection), 'summary has rejection reasons field');
     // deep prospects listing now finds entries
-    assert(out.includes('READY'), 'deep prospects lists dossiers');
+    assert(out.includes('OUTREACH_READY'), 'deep prospects lists dossiers');
   });
 
   // 17b. DeepEmailGenerator gating (unit)
@@ -526,6 +548,83 @@ async function main() {
     } as any);
     assert(!blocked.generated, 'email not generated when gates fail');
     assert(!!blocked.blocked_reason, 'blocked reason provided');
+  });
+
+  // 17c. DEEP FINDING ENGINE (Part B/C/R1-R8) — conservative, evidence-bound
+  await runTest('detectDeepFinding — R1 sensitive metadata / documented incident / NO generic finding', () => {
+    const b = new DeepProspectBuilder({ onProgress: () => {}, logger: () => {} });
+    const detect = (b as any).detectDeepFinding.bind(b);
+
+    // R1: sensitive fields exposed -> defensible LOW-strength finding w/ evidence ids
+    const sensitiveObs: Evidence[] = [{
+      id: 'E-001', evidence_origin: 'REAL_PUBLIC_OBSERVATION' as const,
+      public_url: 'https://api.acme.com/v1/users', source_type: 'API_ENDPOINT' as const,
+      status: 200, observed_behavior: 'response exposes storage_path', sensitive_fields: ['storage_path'],
+      reproductions: 3, repeatable: true, tested_without_auth: true,
+      not_tested: [], retrieved_at: new Date().toISOString(), evidence_text: 'exposes storage_path'
+    }];
+    const f1 = detect([], sensitiveObs);
+    assert(f1 !== null, 'R1 produces a finding for sensitive metadata');
+    assert(f1?.finding_type === 'POSSIBLE_SENSITIVE_METADATA_EXPOSURE', 'R1 type correct');
+    assert(f1?.evidence_ids.length > 0, 'R1 finding carries evidence ids (no evidence-only finding)');
+    assert(f1?.source_urls.length > 0, 'R1 finding carries source urls');
+
+    // Public incident signal WITHOUT observation evidence -> NO finding (no fabricated evidence)
+    const incidentSig = {
+      id: 'S-1', type: 'PUBLIC_INCIDENT', source_url: 'https://acme.com/status',
+      excerpt: 'Outage resolved 2024-03-01. All systems operational.',
+      related_evidence_ids: [], provenance: 'DOCUMENTED_FACT',
+      strength: { evidence_strength: 'LOW', reproducibility: 'LOW', source_quality: 'HIGH', technical_specificity: 'MEDIUM', owner_confidence: 'NOT_APPLICABLE' } as any,
+      relevance_score: 0.7, confidence: 'MEDIUM', explanation: 'status page mentions outage'
+    } as any;
+    const f2 = detect([incidentSig], []);
+    assert(f2 === null, 'a documented-incident signal with no observation evidence does NOT yield a finding (no fabrication)');
+
+    // Generic engineering article signal -> NO finding (Part B: don't convert generic content)
+    const genericSig = {
+      id: 'S-2', type: 'GENERIC_ENGINEERING_ARTICLE', source_url: 'https://acme.com/blog',
+      excerpt: 'We migrated to microservices on AWS, Azure, and GCP.',
+      related_evidence_ids: [], provenance: 'DOCUMENTED_FACT',
+      strength: { evidence_strength: 'LOW', reproducibility: 'LOW', source_quality: 'MEDIUM', technical_specificity: 'LOW', owner_confidence: 'NOT_APPLICABLE' } as any,
+      relevance_score: 0.4, confidence: 'LOW', explanation: 'generic infra blog'
+    } as any;
+    const f3 = detect([genericSig], []);
+    assert(f3 === null, 'generic engineering content never becomes a finding');
+
+    // A genuine repeatable public exposure observation -> POSSIBLE_PUBLIC_EXPOSURE
+    const exposedObs: Evidence[] = [{
+      id: 'E-002', evidence_origin: 'REAL_PUBLIC_OBSERVATION' as const,
+      public_url: 'https://api.acme.com/v1/debug', source_type: 'API_ENDPOINT' as const,
+      status: 200, observed_behavior: 'debug config exposed without auth, accessible to anyone.',
+      reproductions: 4, repeatable: true, tested_without_auth: true,
+      not_tested: [], retrieved_at: new Date().toISOString(), evidence_text: 'config exposed'
+    }];
+    const f4 = detect([genericSig], exposedObs);
+    assert(f4 !== null && f4.finding_type === 'POSSIBLE_PUBLIC_EXPOSURE',
+      'R7 yields POSSIBLE_PUBLIC_EXPOSURE for repeatable unauthenticated exposure (got ' + (f4?.finding_type || 'null') + ')');
+  });
+
+  // 17d. DECISION SEMANTICS — defensible finding + no HIGH owner => RESEARCH_MORE;
+  //      strong ICP + no finding => RESEARCH_MORE; finding w/o evidence => RESEARCH_MORE/NO_GO.
+  await runTest('decision semantics — finding without verified owner stays RESEARCH_MORE (no email)', async () => {
+    // STATUS_HTML gives an incident signal; goEvidence gives a finding, but the team
+    // page intentionally has NO valid person name -> no HIGH owner.
+    const noPeopleRoutes: Record<string, ReturnType<typeof goRoutes>[string]> = {
+      'https://acme.com': { status: 200, body: `<html><body><nav><a href="/status">Status</a></nav><h1>Acme</h1></body></html>`, ct: 'text/html' },
+      'https://acme.com/status': { status: 200, body: STATUS_HTML, ct: 'text/html' }
+    };
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xavira-dec-sem-'));
+    const builder = new DeepProspectBuilder({
+      fetcher: fakeFetcher(noPeopleRoutes),
+      observationProvider: new MockProvider(goEvidence),
+      saveArtifact: (p, d) => writeArtifact(p, d), artifactsBaseDir: tmpDir,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      onProgress: () => {}, logger: () => {}
+    });
+    const { prospect } = await builder.build('https://acme.com');
+    assert(prospect.selected_owner === null, 'no valid HIGH owner on people-less surface');
+    assert(prospect.decision !== 'OUTREACH_READY', 'no OUTREACH_READY without a verified HIGH owner');
+    assert(!prospect.email_draft.generated, 'no email generated without verified owner');
   });
 
   // ── final ──────────────────────────────────────────────────────────────────

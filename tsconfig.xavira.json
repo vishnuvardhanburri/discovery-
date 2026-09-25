@@ -22,9 +22,18 @@
     "src/server/DeepEmailGenerator.ts",
     "src/server/DeepProspectBuilder.ts",
     "src/server/XaviraOperator.ts",
+    "src/server/GrowjoProvider.ts",
+    "src/server/CompanyQueue.ts",
+    "src/server/DomainResolver.ts",
+    "src/server/GitHubDiscovery.ts",
+    "src/server/ActivityTimeline.ts",
     "scripts/xavira.ts",
     "tests/acceptanceTest.ts",
     "tests/xaviraOperator.test.ts",
-    "tests/deepOperator.test.ts"
+    "tests/deepOperator.test.ts",
+    "tests/growjoProvider.test.ts",
+    "tests/companyQueue.test.ts",
+    "tests/findingEngine.test.ts",
+    "tests/orchestration.test.ts"
   ]
 }

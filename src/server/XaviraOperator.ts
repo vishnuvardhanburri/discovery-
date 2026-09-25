@@ -29,7 +29,10 @@ import type {
 } from './IntelligenceCase';
 import type { Fetcher } from './PublicLinkDiscovery';
 import { DeepProspectBuilder } from './DeepProspectBuilder';
-import type { DeepProspect, DeepStage } from './DeepTypes';
+import { GrowjoProvider } from './GrowjoProvider';
+import { CompanyQueue } from './CompanyQueue';
+import { DomainResolver } from './DomainResolver';
+import type { DeepProspect, DeepStage, GrowjoCompany, CompanyResolution, QueueState } from './DeepTypes';
 
 export interface XaviraOperatorOptions {
   /** Injectable fetcher used by discovery + observation provider. */
@@ -50,6 +53,8 @@ export interface XaviraOperatorOptions {
   observationProvider?: PublicObservationProvider;
   /** Override the base directory for persisted artifacts (defaults to cwd). */
   artifactsDir?: string;
+  /** Path to the persistent research queue (defaults to <artifactsDir>/intelligence/queue.jsonl). */
+  queuePath?: string;
 }
 
 export class XaviraOperator {
@@ -79,6 +84,11 @@ export class XaviraOperator {
   private deepProspects: DeepProspect[] = [];
   private artifactsDir?: string;
 
+  // GROWJO + persistent research queue
+  private growjoRecords: GrowjoCompany[] = [];
+  private queue: CompanyQueue | null = null;
+  private queuePath: string;
+
   constructor(options: XaviraOperatorOptions = {}) {
     this._options = options;
     this.fetcher = options.fetch;
@@ -89,6 +99,9 @@ export class XaviraOperator {
     this.discoveryTimeoutMs = options.discoveryTimeoutMs ?? 8000;
     this.observationDelayMs = options.observationDelayMs ?? 200;
     this.injectedProvider = options.observationProvider;
+    this.artifactsDir = options.artifactsDir;
+    this.queuePath = options.queuePath || path.join(this.artifactsDir || process.cwd(), 'artifacts', 'intelligence', 'queue.jsonl');
+    try { this.queue = new CompanyQueue(this.queuePath); } catch { this.queue = null; }
     this.artifactsDir = options.artifactsDir;
   }
 
@@ -129,11 +142,16 @@ export class XaviraOperator {
       switch (command) {
         case 'research':  await this.cmdResearch(args); break;
         case 'deep':      await this.cmdDeep(args); break;
+        case 'import':    await this.cmdImport(args); break;
+        case 'hunt':      await this.cmdHunt(args); break;
+        case 'pipeline':  this.cmdPipeline(); break;
+        case 'resume':    await this.cmdResume(args); break;
+        case 'ready':     this.cmdReady(); break;
         case 'status':    this.cmdStatus(); break;
         case 'show':      this.cmdShow(args); break;
         case 'why':       args.toLowerCase() === 'owner' ? this.cmdWhyOwner() : this.println('Unknown "why" subcommand. Use "why owner".'); break;
         case 'draft':     args.toLowerCase() === 'email' ? this.cmdDraftEmail() : this.println('Unknown "draft" subcommand. Use "draft email".'); break;
-        case 'export':    this.cmdExport(); break;
+        case 'export':    await this.cmdExport(args); break;
         case 'help':      this.cmdHelp(); break;
         case 'send':      await this.cmdSend(args); break;
         case 'exit':
@@ -298,6 +316,7 @@ export class XaviraOperator {
     // `show all` routes to the deep dossier and should not be blocked by the
     // basic-case guard (a deep run may exist without a classic `research` case).
     if (sub === 'all') { this.cmdShowAll(); return; }
+    if (sub.startsWith('company')) { this.cmdShowCompany(args.replace(/^company\s+/i, '').trim()); return; }
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
     const c = this.currentCase;
 
@@ -447,11 +466,252 @@ export class XaviraOperator {
     this.println('NEVER AUTO-SENT. Use "send" (requires explicit confirmation + configured transport).');
   }
 
-  cmdExport(): void {
-    if (!this.currentCase) { this.println('No active research to export.'); return; }
-    if (!this.artifactPath) this.artifactPath = this.persistArtifact(this.currentCase, this.currentCase.company);
-    this.println(`Artifact persisted at: ${this.artifactPath}`);
+  async cmdExport(args: string): Promise<void> {
+    const sub = (args || '').trim().toLowerCase();
+    if (sub === 'queue' || sub === 'prospects' || sub === 'deep') {
+      // Export the full deep-prospect dossier set + research queue.
+      const dir = path.join(this.artifactsDir || process.cwd(), 'artifacts', 'intelligence');
+      const outPath = path.join(dir, `export_${Date.now()}.json`);
+      const payload = {
+        deep_prospects: this.deepProspects,
+        queue: this.queue ? this.queue.list() : [],
+        generated_at: new Date().toISOString(),
+      };
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(outPath, JSON.stringify(payload, (k, v) => (k === 'case_ref' ? undefined : v), 2), 'utf8');
+        this.println(`Exported ${this.deepProspects.length} deep prospect(s) + ${this.queue ? this.queue.count() : 0} queued company/companies to: ${outPath}`);
+      } catch (e: any) {
+        this.println(`Export failed: ${e?.message || String(e)}`);
+      }
+      return;
+    }
+    if (!this.currentDeep && !this.currentCase) { this.println('No active research to export.'); return; }
+    if (this.currentDeep) {
+      if (!this.currentDeep.artifact_path) this.currentDeep.artifact_path = this.persistDeepArtifact(this.currentDeep);
+      this.println(`Deep artifact persisted at: ${this.currentDeep.artifact_path}`);
+    } else if (this.currentCase) {
+      if (!this.artifactPath) this.artifactPath = this.persistArtifact(this.currentCase, this.currentCase.company);
+      this.println(`Artifact persisted at: ${this.artifactPath}`);
+    }
   }
+
+  // ═════════════════════ GROWJO IMPORT + HUNT QUEUE ═══════════════════════════
+
+  /** import <growjo.csv> — parse a Growjo CSV and load it into the research queue. */
+  async cmdImport(args: string): Promise<void> {
+    const csvPath = (args || '').trim();
+    if (!csvPath) {
+      this.println('Usage: import <growjo.csv>');
+      return;
+    }
+    let text: string;
+    try { text = fs.readFileSync(csvPath, 'utf8'); }
+    catch (e: any) { this.println(`Cannot read CSV "${csvPath}": ${e?.message || e}`); return; }
+    const result = GrowjoProvider.parseCsv(text);
+    this.growjoRecords = result.companies;
+    this.println(`Growjo import: ${result.companies.length} company/companies loaded from ${result.total_rows} row(s).`);
+    this.println(`Column mapping: ${JSON.stringify(result.column_mapping)}`);
+    if (result.duplicate_domains_dropped) this.println(`  (dropped ${result.duplicate_domains_dropped} duplicate-domain row(s).)`);
+    for (const w of result.warnings) this.println(`  warning: ${w}`);
+    // Load into the persistent queue.
+    if (this.queue) {
+      const { added, duplicates } = this.queue.enqueue(result.companies);
+      this.println(`Queue: added ${added} (ignored ${duplicates} existing by canonical domain).`);
+      this.println(`Queue total: ${this.queue.count()} (QUEUED: ${this.queue.count('QUEUED')}).`);
+    } else {
+      this.println('Queue not available (filesystem not writable in this context).');
+    }
+    this.println(`Next: "hunt ${csvPath} --batch <n>" to start autonomous research.`);
+  }
+
+  /** hunt <growjo.csv> [--batch N] | hunt <company> */
+  async cmdHunt(args: string): Promise<void> {
+    const trimmed = (args || '').trim();
+    if (!trimmed) { this.println('Usage: hunt <growjo.csv> [--batch N]   |   hunt <company-name>'); return; }
+    const toks = trimmed.split(/\s+/);
+    const target = toks[0];
+    const isCsv = /^(.+\.csv)$/i.test(target);
+    if (isCsv) {
+      const batchMatch = trimmed.match(/--batch\s+(\d+)/);
+      const batchSize = batchMatch ? parseInt(batchMatch[1], 10) : 5;
+      // Import the CSV first if not already loaded.
+      if (this.growjoRecords.length === 0) {
+        try {
+          const text = fs.readFileSync(target, 'utf8');
+          const result = GrowjoProvider.parseCsv(text);
+          this.growjoRecords = result.companies;
+          if (this.queue) this.queue.enqueue(result.companies);
+          this.println(`Loaded ${result.companies.length} company/companies from ${target}.`);
+        } catch (e: any) { this.println(`Cannot read CSV "${target}": ${e?.message || e}`); return; }
+      }
+      await this.researchBatch(batchSize);
+      return;
+    }
+    // Single company by name -> resolve + research.
+    const growjo = this.growjoRecords.find(g => g.canonical_name.toLowerCase() === target.toLowerCase());
+    await this.researchOne(target, growjo || null);
+  }
+
+  /** researchBatch <n> — research up to n QEUED companies end-to-end. */
+  private async researchBatch(batchSize: number): Promise<void> {
+    if (!this.queue) { this.println('Queue unavailable.'); return; }
+    const slice = this.queue.list('QUEUED').slice(0, batchSize);
+    if (slice.length === 0) { this.println(`No QUEUED companies. Run "pipeline" to inspect, or "import <csv>" to load leads.`); return; }
+    this.println(`\n=== XAVIRA HUNT BATCH: ${slice.length} company/companies ===`);
+    let i = 0;
+    for (const row of slice) {
+      i++;
+      this.println(`\n[${i}/${slice.length}] researching ${row.company} (domain: ${row.domain || 'resolving...'})`);
+      try {
+        await this.researchOne(row.company, row.growjo || null, row.id);
+      } catch (e: any) {
+        this.println(`  error researching ${row.company}: ${e?.message || String(e)}`);
+        if (this.queue) this.queue.markResearched(row.id, 'NO_GO', 'LOW', 'ERROR', null, null, 'NO_GO', e?.message || String(e));
+      }
+    }
+    this.println('\n--- Batch complete ---');
+    this.cmdPipeline();
+  }
+
+  /** researchOne <nameOrUrl> — resolve domain + run the full deep pipeline + queue result. */
+  private async researchOne(nameOrUrl: string, growjo: GrowjoCompany | null, queueId?: string): Promise<void> {
+    let targetUrl: string | null = null;
+    let resolution: CompanyResolution | null = growjo ? {
+      canonical_name: growjo.canonical_name, official_domain: growjo.domain,
+      resolution_method: 'GROWJO_DOMAIN',
+      resolution_source: growjo.source_url || growjo.growjo_url || 'GROWJO record',
+      resolution_confidence: growjo.domain ? 'HIGH' : 'LOW'
+    } : null;
+
+    // If Growjo gave us a domain/website, use it as the seed directly.
+    if (growjo && growjo.domain) {
+      targetUrl = `https://${growjo.domain}`;
+    } else if (growjo && growjo.website) {
+      targetUrl = growjo.website;
+    }
+
+    // If only a bare company name, attempt domain resolution via DomainResolver
+    // (legit public sources only; never guesses). For named inputs we still run
+    // the full deep research using the name as the target.
+    if (!targetUrl) {
+      this.println(`  [resolve] ${nameOrUrl} — resolving (Growjo has no domain; public resolution only)`);
+      const seed = { domain: growjo?.domain || null, website_url: growjo?.website || null, company_name: nameOrUrl };
+      if (this.fetcher) {
+        resolution = await DomainResolver.resolve(seed, this.fetcher as any);
+      }
+      if (resolution?.official_domain) targetUrl = `https://${resolution.official_domain}`;
+      else {
+        this.println(`  [resolve] AMBIGUOUS — no legitimate domain for ${nameOrUrl} (never guessed).`);
+        if (this.queue && queueId) this.queue.markResolving(queueId, resolution ?? {
+          canonical_name: nameOrUrl, official_domain: null, resolution_method: 'AMBIGUOUS',
+          resolution_source: null, resolution_confidence: 'LOW'
+        });
+        // Still attempt a deep run against the bare name so the operator sees surface.
+        targetUrl = nameOrUrl;
+      }
+      if (this.queue && queueId && resolution) this.queue.markResolving(queueId, resolution);
+    }
+
+    // Run the deep pipeline (Growjo + resolution wired into the builder).
+    const builder = this.deepBuilder(true, growjo, resolution);
+    const { prospect, case_ref } = await builder.build(targetUrl.startsWith('http') ? targetUrl : `https://${targetUrl}`);
+    this.currentDeep = prospect;
+    this.deepProspects.push(prospect);
+    if (case_ref) {
+      case_ref.owner_candidates = prospect.owner_candidates;
+      case_ref.company_surface = prospect.public_surface;
+      this.currentCase = case_ref;
+    }
+
+    this.println(`  → ${prospect.company} → ${prospect.decision} (confidence ${prospect.confidence})`);
+    if (prospect.deep_finding) this.println(`     finding: ${prospect.deep_finding.finding_type} (${prospect.deep_finding.confidence}) — ${prospect.deep_finding.explanation.slice(0, 80)}`);
+    else this.println(`     finding: NONE (no defensible deep finding — not fabricated)`);
+    this.println(`     owner: ${prospect.selected_owner ? `${prospect.selected_owner.name} (${prospect.selected_owner.confidence})` : '(none)'}`);
+    this.println(`     artifact: ${prospect.artifact_path}`);
+
+    // Persist outcome to the queue.
+    const findingType = prospect.deep_finding?.finding_type || prospect.findings?.finding_type || null;
+    const ownerName = prospect.selected_owner?.name || null;
+    let nextState: QueueState;
+    if (prospect.decision === 'OUTREACH_READY') nextState = 'OUTREACH_READY';
+    else if (prospect.decision === 'NO_GO') nextState = 'NO_GO';
+    else nextState = 'RESEARCH_MORE';
+    if (this.queue && queueId) this.queue.markResearched(queueId, prospect.decision, prospect.confidence, findingType, ownerName, prospect.artifact_path, nextState);
+    else if (this.queue) this.queue.enqueueName(prospect.company, prospect.domain);
+  }
+
+  /** pipeline — show the persistent research queue (all states + counts). */
+  cmdPipeline(): void {
+    if (!this.queue) { this.println('No queue configured.'); return; }
+    const rows = this.queue.list();
+    this.println(`\n=== XAVIRA RESEARCH PIPELINE === (queue: ${this.queuePath})`);
+    const counts: Partial<Record<QueueState, number>> = {};
+    for (const r of rows) counts[r.state] = (counts[r.state] || 0) + 1;
+    for (const s of ['QUEUED', 'RESOLVING', 'RESEARCHING', 'RESEARCH_MORE', 'NO_GO', 'OUTREACH_READY', 'CONTACT_READY', 'APPROVED', 'SENT']) {
+      this.println(`  ${s.padEnd(16)} ${counts[s as QueueState] || 0}`);
+    }
+    this.println(`  ──────────────────────────────── total: ${rows.length}`);
+    this.println(`\nNext: "resume [--batch N]" to research the next queued company/companies.`);
+  }
+
+  /** resume [--batch N] — research the next N QUEUED companies. Defaults to 1. */
+  async cmdResume(args: string): Promise<void> {
+    const m = (args || '').match(/--batch\s+(\d+)/);
+    const n = m ? parseInt(m[1], 10) : 1;
+    await this.researchBatch(n);
+  }
+
+  /** ready — list companies whose research reached OUTREACH_READY (awaiting approval). */
+  cmdReady(): void {
+    if (!this.queue) { this.println('No queue configured.'); return; }
+    const ready = this.queue.list('OUTREACH_READY');
+    this.println(`\n=== OUTREACH READY (${ready.length}) ===`);
+    if (ready.length === 0) this.println('No companies reached OUTREACH_READY. Use "pipeline" to inspect progress.');
+    for (const r of ready) {
+      this.println(`  • ${r.company} — finding: ${r.prospect?.finding || 'NONE'} — owner: ${r.prospect?.owner || '(none)'}`);
+      if (r.artifact_path) this.println(`    artifact: ${r.artifact_path}`);
+      this.println(`    approve with: "approve ${r.id}" (then "send --confirm")`);
+    }
+  }
+
+  /** show company <name> — display a company's queued/research record. */
+  cmdShowCompany(name: string): void {
+    if (!this.queue || !name) { this.println('Usage: show company <name>'); return; }
+    const match = this.queue.list().find(r =>
+      r.company.toLowerCase() === name.toLowerCase() ||
+      r.growjo?.canonical_name.toLowerCase() === name.toLowerCase()
+    );
+    if (!match) { this.println(`No queued company matching "${name}".`); return; }
+    this.println(`\n=== COMPANY: ${match.company} ===`);
+    this.println(`  state:        ${match.state}`);
+    this.println(`  domain:       ${match.domain || '(resolving)'}`);
+    this.println(`  resolution:   ${match.resolution ? `${match.resolution.resolution_method} (${match.resolution.resolution_confidence})` : '(pending)'}`);
+    this.println(`  growjo:       ${match.growjo ? `source=${match.growjo.source_url} retrieved=${match.growjo.retrieved_at}` : '(none)'}`);
+    if (match.prospect) {
+      this.println(`  decision:      ${match.prospect.decision} (${match.prospect.confidence})`);
+      this.println(`  finding:       ${match.prospect.finding || 'NONE'}`);
+      this.println(`  owner:         ${match.prospect.owner || '(none)'}`);
+    }
+    if (match.artifact_path) this.println(`  artifact:     ${match.artifact_path}`);
+    this.println(`  enqueued:     ${match.enqueued_at}`);
+    this.println(`  updated:      ${match.updated_at}`);
+    if (match.last_error) this.println(`  last error:   ${match.last_error}`);
+  }
+
+  private persistDeepArtifact(prospect: DeepProspect): string {
+    const dir = path.join(this.artifactsDir || process.cwd(), 'artifacts', 'intelligence', 'deep');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
+    if (this.saveArtifact) {
+      const p = path.join(dir, prospect.artifact_path.split('/').pop() || `${Date.now()}.json`);
+      this.saveArtifact(p, JSON.stringify(prospect, (k, v) => (k === 'case_ref' ? undefined : v), 2));
+      return p;
+    }
+    const p = path.join(dir, prospect.artifact_path.split('/').pop() || `${Date.now()}.json`);
+    fs.writeFileSync(p, JSON.stringify(prospect, (k, v) => (k === 'case_ref' ? undefined : v), 2), 'utf8');
+    return p;
+  }
+
 
   cmdHelp(): void {
     this.println(`\nXAVIRA INTELLIGENCE OPERATOR — commands`);
@@ -469,6 +729,14 @@ export class XaviraOperator {
     this.println(`      deep research <url>  Same as above (explicit verb).`);
     this.println(`      deep file <csv>      Batch deep-research a CSV of companies.`);
     this.println(`      deep prospects       List persisted deep-prospect dossiers.`);
+    this.println(`  import <growjo.csv>     Import a Growjo CSV into the research queue.`);
+    this.println(`  hunt <growjo.csv> [--batch N]  Start autonomous research on the next N queued leads.`);
+    this.println(`  hunt <company>          Research a single company by name (domain resolution only).`);
+    this.println(`  pipeline                Show the persistent research queue (all states + counts).`);
+    this.println(`  resume [--batch N]      Research the next N QUEUED companies (default 1).`);
+    this.println(`  ready                   List companies that reached OUTREACH_READY (awaiting approval).`);
+    this.println(`  show company <name>     Show a company's queued/research record.`);
+    this.println(`  export [queue|deep]     Export deep prospects + research queue to JSON.`);
     this.println(`  show all               Show the complete current deep-prospect dossier.`);
     this.println(`  help                    Show this help.`);
     this.println(`  exit | quit             Leave the operator.`);
@@ -476,8 +744,9 @@ export class XaviraOperator {
   }
 
   async cmdSend(args: string): Promise<void> {
-    if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
+    const deep = this.currentDeep;
     const c = this.currentCase;
+    if (!deep && !c) { this.println('No active research. Run "research <url>" first.'); return; }
     // Human approval gate comes FIRST: even without a configured transport, the
     // operator must refuse any send that lacks explicit confirmation.
     const confirm = args.includes('--confirm') || args.toLowerCase().includes('confirm');
@@ -485,8 +754,12 @@ export class XaviraOperator {
       this.println(`Send requires explicit confirmation. Re-run as: send --confirm`);
       return;
     }
-    if (c.prospect_decision !== 'GO' || c.claim_validation !== 'PASSED') {
-      this.println('Send blocked: decision is not GO or claim QA did not PASS.');
+    // Deep gate: require OUTREACH_READY (real finding + evidence + verified HIGH
+    // owner + relevant relationship + CLAIM QA PASSED + email generated).
+    const deepReady = deep && deep.decision === 'OUTREACH_READY' && deep.email_draft.generated;
+    const engineReady = c && c.prospect_decision === 'GO' && c.claim_validation === 'PASSED';
+    if (!deepReady && !engineReady) {
+      this.println('Send blocked: decision is not OUTREACH_READY.');
       return;
     }
     if (!this.sendingConfigured) {
@@ -500,7 +773,7 @@ export class XaviraOperator {
     // requires a final human confirmation in the interactive terminal. This stub
     // preserves that contract and never auto-delivers.
     this.println('Intent recorded: send requested with --confirm. Operator would deliver via the');
-    this.println(`configured SMTP transport to ${c.technical_owner?.name || ''}. Review and confirm`);
+    this.println(`configured SMTP transport to ${deep?.selected_owner?.name || c?.technical_owner?.name || ''}. Review and confirm`);
     this.println('delivery in the interactive terminal before any actual send occurs.');
   }
 
@@ -533,7 +806,7 @@ export class XaviraOperator {
     this.println(`\nDeep research is READ-ONLY and strictly bounded to the target public surface.`);
   }
 
-  private deepBuilder(verbose: boolean) {
+  private deepBuilder(verbose: boolean, growjo?: GrowjoCompany | null, resolution?: CompanyResolution | null) {
     return new DeepProspectBuilder({
       fetcher: this.fetcher,
       saveArtifact: this.saveArtifact,
@@ -543,6 +816,8 @@ export class XaviraOperator {
       observationDelayMs: this.observationDelayMs,
       observationProvider: this.injectedProvider ?? null,
       artifactsBaseDir: this.artifactsDir,
+      growjo: growjo ?? null,
+      resolution: resolution ?? null,
       onProgress: (stage: DeepStage, message: string) => this.progress(stage, message),
       logger: verbose ? (m: string) => this.println(`  ${m}`) : undefined
     });
@@ -626,7 +901,7 @@ export class XaviraOperator {
     }
 
     const total = results.length;
-    const ready = results.filter(x => x.decision === 'READY').length;
+    const outreach_ready = results.filter(x => x.decision === 'OUTREACH_READY').length;
     const research_more = results.filter(x => x.decision === 'RESEARCH_MORE').length;
     const no_go = results.filter(x => x.decision === 'NO_GO').length;
 
@@ -634,7 +909,7 @@ export class XaviraOperator {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const summaryPath = path.join(dir, `_batch_${ts}.json`);
     const summary = {
-      total, ready, research_more, no_go,
+      total, outreach_ready, research_more, no_go,
       generated: new Date().toISOString(),
       results,
       top_reasons_for_rejection: Array.from(new Set(reasons)).slice(0, 10)
@@ -642,7 +917,7 @@ export class XaviraOperator {
     const data = JSON.stringify(summary, null, 2);
     if (this.saveArtifact) this.saveArtifact(summaryPath, data);
     else { try { fs.mkdirSync(dir, { recursive: true }); } catch { /* exists */ } fs.writeFileSync(summaryPath, data, 'utf8'); }
-    this.println(`\nBatch summary: ${total} total → ${ready} READY, ${research_more} RESEARCH_MORE, ${no_go} NO_GO`);
+    this.println(`\nBatch summary: ${total} total → ${outreach_ready} OUTREACH_READY, ${research_more} RESEARCH_MORE, ${no_go} NO_GO`);
     this.println(`Summary artifact: ${summaryPath}`);
   }
 

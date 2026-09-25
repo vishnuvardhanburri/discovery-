@@ -204,12 +204,12 @@ export class IcpQualificationEngine {
       overall = 'RESEARCH_MORE';
       gated_reason = reasons.join(' ');
     } else {
-      // All gates satisfied — but require a defensible finding OR HIGH owner for a true PASS.
+      // All gates satisfied — require a defensible finding OR HIGH owner for a true OUTREACH_READY.
       const hasDefensibleFinding = findingIsDefensible;
       const hasHighOwner = ownerScore >= 2;
       const hasProfContact = profChannel;
       if (hasDefensibleFinding && hasHighOwner && hasProfContact) {
-        overall = 'PASS';
+        overall = 'OUTREACH_READY';
         gated_reason = undefined;
       } else {
         overall = 'RESEARCH_MORE';
@@ -222,7 +222,7 @@ export class IcpQualificationEngine {
     }
 
     const sum = dims.reduce((a, d) => a + d.score, 0);
-    if (overall === 'PASS' || sum >= 10) fit = 'STRONG';
+    if (overall === 'OUTREACH_READY' || sum >= 10) fit = 'STRONG';
     else if (sum >= 4) fit = 'WEAK';
     else fit = 'POOR';
 

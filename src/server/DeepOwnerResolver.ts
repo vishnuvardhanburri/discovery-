@@ -44,6 +44,13 @@ export class DeepOwnerResolver {
     }
 
     const candidate = sel.candidate;
+    // Part E: never synthesize or promote a LOW/MEDIUM identity to HIGH.
+    // An owner is only "verified" when the candidate is explicitly HIGH
+    // (real person + role + company context, on a people-context page).
+    if (!candidate || candidate.confidence !== 'HIGH') {
+      onProgress?.('owners', 'Owner graph: no verified HIGH-confidence person (NONE).');
+      return null;
+    }
     const responsibility = candidate.relationship_to_area || `Role '${candidate.role}' covers ${technicalArea}.`;
     const subsystem = subsystemFromFinding(classification, resolvedEvidence) || technicalArea || 'platform engineering';
 
