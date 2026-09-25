@@ -3,8 +3,25 @@
 // Builds the FINAL first-contact outreach email exclusively from the finding-led
 // evidence lineage (DeepFinding + DeepOwner + contactability + IntelligenceCase).
 //
-// The email ALWAYS follows the XAVIRA 9-section structure. The CLAIM -> EVIDENCE
-// map is rendered from the claim list (each claim carries evidence_ids).
+// The email ALWAYS follows the XAVIRA 9-section structure (verbatim spec):
+//
+//   Hi {{FirstName}},
+//   I'm Vishnu, the solo founder building XAVIRA.
+//   I was looking at {{Company}}'s public {{technical surface}} and noticed {{specific observation}}.
+//   I was able to {{safe reproduction statement}}, where applicable.
+//   Source: {{URL}}
+//   I reached out because your public role is associated with {{technical area}}.
+//   I'd rather show you something you can verify than ask you to take my word for it.
+//   This isn't a sales pitch, and there is no meeting request.
+//   If useful, reply "details" and I'll send over the evidence.
+//   Best,
+//   Vishnu
+//   Founder, XAVIRA
+//
+// The CLAIM -> EVIDENCE map is preserved in the returned `claims` list: every
+// factual claim (OBSERVATION / REPRODUCTION / OWNER) carries the evidence_ids
+// that support it, so the lineage (observation -> finding -> email) stays
+// traceable. 80-150 words preferred.
 //
 // GATE (per XAVIRA spec):
 //   REAL FINDING (defensible) + EVIDENCE + VERIFIED PERSON (HIGH owner) +
@@ -99,36 +116,40 @@ export class DeepEmailGenerator {
       && finding.strength.reproducibility !== 'LOW';
     const first = owner ? owner.name.split(' ')[0] : 'there';
     const techArea = owner?.finding_link || 'technical ownership';
+    const observedText = (finding.explanation || finding.severity_basis || 'a publicly observable behavior').trim();
+    const reproStatement = reproducible
+      ? 'reproduce the observed behavior using a normal read-only request (no auth bypass)'
+      : 'verify this specific observation against the public surface with a normal read-only request';
+    const sourceUrl = finding.source_urls?.[0] || '';
 
-    const claims: EvidenceClaim[] = [];
-    claims.push({ text: `Hi ${first},`, evidence_ids: [], claim_type: 'STANDARD_BLOCK' });
-    claims.push({
-      text: "I'm Vishnu, the solo founder building XAVIRA. I'd rather show you something you can verify than ask you to trust me.",
-      evidence_ids: [], claim_type: 'STANDARD_BLOCK'
-    });
-    // The single primary finding, stated factually.
-    claims.push({
-      text: `I observed:\n${finding.explanation}`,
-      evidence_ids: ev, claim_type: 'OBSERVATION'
-    });
+    const claims: EvidenceClaim[] = [
+      // Section 1 — greeting (personalized)
+      { text: `Hi ${first},`, evidence_ids: [], claim_type: 'STANDARD_BLOCK' },
+      // Section 2 — founder identity (verbatim spec line)
+      { text: "I'm Vishnu, the solo founder building XAVIRA.", evidence_ids: [], claim_type: 'STANDARD_BLOCK' },
+      // Section 3 — the specific observation (evidence-backed)
+      { text: observedText, evidence_ids: ev, claim_type: 'OBSERVATION' },
+    ];
+    // Section 4 — safe reproduction statement ("where applicable")
     if (reproducible) {
-      claims.push({
-        text: 'The behavior was reproducible from the public side using a normal read-only request (no auth bypass).',
-        evidence_ids: ev, claim_type: 'REPRODUCTION'
-      });
+      claims.push({ text: reproStatement, evidence_ids: ev, claim_type: 'REPRODUCTION' });
+    } else {
+      // Still surfaced in the body (section 4) as a safe verify statement; not a
+      // factual reproduction claim because reproducibility is not established.
+      claims.push({ text: reproStatement, evidence_ids: [], claim_type: 'STANDARD_BLOCK' });
     }
-    claims.push({
-      text: `I reached out because your public role is associated with ${techArea} at ${prospect.company}.`,
-      evidence_ids: ev, claim_type: 'OWNER'
-    });
-    claims.push({
-      text: "This isn't a sales pitch, and there is no meeting request.",
-      evidence_ids: [], claim_type: 'STANDARD_BLOCK'
-    });
-    claims.push({
-      text: 'If useful, reply "details" and I will send over the evidence.',
-      evidence_ids: [], claim_type: 'STANDARD_BLOCK'
-    });
+    claims.push(
+      // Section 5 — source citation
+      { text: sourceUrl ? `Source: ${sourceUrl}` : 'Source: (unavailable)', evidence_ids: ev, claim_type: 'STANDARD_BLOCK' },
+      // Section 6 — relevance to the owner's technical area (evidence-backed)
+      { text: `I reached out because your public role is associated with ${techArea}.`, evidence_ids: ev, claim_type: 'OWNER' },
+      // Section 7
+      { text: "I'd rather show you something you can verify than ask you to take my word for it.", evidence_ids: [], claim_type: 'STANDARD_BLOCK' },
+      // Section 8
+      { text: "This isn't a sales pitch, and there is no meeting request.", evidence_ids: [], claim_type: 'STANDARD_BLOCK' },
+      // Section 9
+      { text: 'If useful, reply "details" and I\'ll send over the evidence.', evidence_ids: [], claim_type: 'STANDARD_BLOCK' },
+    );
     return claims;
   }
 
@@ -160,25 +181,26 @@ export class DeepEmailGenerator {
     const company = prospect.company;
     const techArea = owner?.finding_link || 'the relevant technical area';
 
+    // --- Section 3: the specific observation ---
     const obsClaim = claims.find(c => c.claim_type === 'OBSERVATION' || c.claim_type === 'DOCUMENTED_FACT');
-    const reproClaim = claims.find(c => c.claim_type === 'REPRODUCTION');
+    let observedText = obsClaim ? DeepEmailGenerator.extractObservation(obsClaim.text) : '';
+    if (!observedText) observedText = (finding as DeepFinding | null)?.explanation || '';
+    if (!observedText) observedText = finding?.severity_basis || '';
+    if (!observedText) observedText = 'a publicly observable behavior on the documented surface';
+    observedText = DeepEmailGenerator.cleanSentence(observedText);
 
-    // "I observed:" — prefer the claim's factual wording (engine), fall back to the finding.
-    let observedText: string;
-    if (obsClaim) {
-      observedText = obsClaim.text.replace(/^.*I observed:\s*/is, '').trim();
-    } else if (finding) {
-      observedText = finding.finding_type.startsWith('OBSERVED_')
-        ? `Observed: ${finding.severity_basis}`
-        : `The public surface shows: ${finding.severity_basis}`;
-    } else {
-      observedText = 'a publicly observable behavior on the documented surface';
-    }
+    // --- Section 4: safe reproduction statement ("where applicable") ---
+    const isReal = (finding as DeepFinding | null)?.provenance === 'REAL_PUBLIC_OBSERVATION';
+    const strength = (finding as DeepFinding | null)?.strength;
+    const reproducible = !!isReal && !!strength && strength.reproducibility !== 'LOW';
+    const reproStatement = reproducible
+      ? 'reproduce the observed behavior using a normal read-only request (no auth bypass)'
+      : 'verify this specific observation against the public surface with a normal read-only request';
 
-    const deepUrls = finding ? (finding as DeepFinding).source_urls : [];
-    const deepUrl = deepUrls?.[0] || '';
+    // --- Section 5: source URL ---
+    const deepUrls = finding ? ((finding as DeepFinding).source_urls || []) : [];
     const claimUrls = obsClaim ? (obsClaim.text.match(/https?:\/\/[^\s\n]+/g) || []) : [];
-    const evidenceUrl = deepUrl || claimUrls[0] || '';
+    const evidenceUrl = deepUrls[0] || claimUrls[0] || '';
     let hostname = prospect.domain;
     let path = '';
     if (evidenceUrl) {
@@ -187,57 +209,57 @@ export class DeepEmailGenerator {
         hostname = u.hostname;
         path = u.pathname.replace(/^\/$/, '');
       } catch {
-        hostname = prospect.public_surface.homepage;
+        hostname = prospect.public_surface?.homepage || prospect.domain;
       }
     }
-    const displaySrc = evidenceUrl || prospect.public_surface.homepage || hostname;
+    const displaySrc = evidenceUrl || prospect.public_surface?.homepage || hostname;
+    const surface = path && path !== '/' ? path : 'public surface';
 
-    const reproBlock = reproClaim
-      ? `\nI was able to reproduce the publicly observable behavior:\n${reproClaim.text}\n`
-      : '';
-
-    // ---- SUBJECTS (finding-led) ----
-    const fb = (finding ? finding.finding_type : 'observation')
-      .replace(/_/g, ' ').toLowerCase();
+    // --- Subjects (finding-led: "Possible … in the …" / "Observed … on …") ---
     let primary_subject: string;
     let alternate_subject: string;
     if (finding && finding.finding_type.startsWith('OBSERVED_')) {
-      primary_subject = `Observed ${finding.finding_type.replace(/^OBSERVED_/, '').replace(/_/g, ' ').toLowerCase()} on ${hostname}${path ? path : '/'}`;
-      alternate_subject = `Quick technical note on ${hostname}${path ? path : '/'}`;
-    } else if (finding && finding.finding_type.startsWith('DOCUMENTED_')) {
-      primary_subject = `Possible ${fb} on ${hostname}`;
-      alternate_subject = `Technical note regarding ${fb} at ${hostname}`;
+      const detail = finding.finding_type.replace(/^OBSERVED_/, '').replace(/_/g, ' ').toLowerCase();
+      primary_subject = `Observed ${detail} on ${hostname}`;
+      alternate_subject = `Quick technical note on ${hostname}`;
+    } else if (finding) {
+      const detail = finding.finding_type.replace(/^POSSIBLE_|^DOCUMENTED_/, '').replace(/_/g, ' ').toLowerCase();
+      primary_subject = `Possible ${detail} in the ${surface}`;
+      alternate_subject = `Technical note regarding ${detail} at ${hostname}`;
     } else {
-      primary_subject = `Possible ${fb} in the ${path || 'public surface'}`;
-      alternate_subject = `Technical note regarding ${fb} at ${hostname}`;
+      primary_subject = `Possible technical observation in the ${surface}`;
+      alternate_subject = `Technical note on ${hostname}`;
     }
 
-    // ---- 9-SECTION BODY ----
-    const body =
-`Hi ${firstName},
-
-I'm Vishnu, the solo founder building XAVIRA.
-
-I was looking at ${company}'s public ${techArea} and noticed something I'd like to verify with you.
-
-I observed:
-${observedText}
-
-Source:
-${displaySrc}
-${reproBlock}
-I reached out because your public role is associated with ${techArea} at ${company}.
-
-I'd rather show you something you can verify than ask you to take my word for it.
-
-This isn't a sales pitch, and there is no meeting request.
-
-If useful, reply "details" and I'll send over the evidence.
-
-Best,
-Vishnu
-Founder, XAVIRA`;
+    // --- 9-SECTION BODY (verbatim XAVIRA spec, no blank lines) ---
+    const body = [
+      `Hi ${firstName},`,
+      "I'm Vishnu, the solo founder building XAVIRA.",
+      `I was looking at ${company}'s public ${techArea} and noticed ${observedText}.`,
+      `I was able to ${reproStatement}, where applicable.`,
+      `Source: ${displaySrc}`,
+      `I reached out because your public role is associated with ${techArea}.`,
+      "I'd rather show you something you can verify than ask you to take my word for it.",
+      "This isn't a sales pitch, and there is no meeting request.",
+      'If useful, reply "details" and I\'ll send over the evidence.',
+      'Best,',
+      'Vishnu',
+      'Founder, XAVIRA',
+    ].join('\n');
 
     return { primary_subject, alternate_subject, body };
+  }
+
+  /** Strip reportage preamble so the factual observation is surfaced cleanly. */
+  private static extractObservation(text: string): string {
+    let t = text.replace(/\s+/g, ' ').trim();
+    const m = t.match(/I observed that:\s*(.+)$/i) || t.match(/explicitly documents:\s*(.+)$/i);
+    if (m) t = m[1].trim();
+    return t;
+  }
+
+  /** Collapse whitespace and strip a trailing sentence terminator (template adds one). */
+  private static cleanSentence(text: string): string {
+    return text.replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '');
   }
 }

@@ -38,6 +38,18 @@ import { ActivityTimeline } from './ActivityTimeline';
 import { IcpQualificationEngine, type IcpContext } from './IcpQualificationEngine';
 import { DeepEmailGenerator } from './DeepEmailGenerator';
 
+/**
+ * Language cues that an observation is *exposed without authentication*.
+ * Shared by the R7 public-exposure rule and the adversarial-corroboration
+ * (conflict) check so the two paths never diverge on matching semantics.
+ */
+const EXPOSURE_LANGUAGE_RE = /\b(unauthenticated|without\s+auth|publicly\s+accessible|open\s+to|exposed|disclosed|accessible\s+without|directory\s+listing|backup\s+file|debug=|env|config\s+exposed)\b/i;
+/**
+ * Language cues that an observation reports an auth *denial* (401/403 boundary).
+ * Shared by the R8 access-issue rule and the adversarial-corroboration check.
+ */
+const DENIAL_LANGUAGE_RE = /\b(unauthorized|forbidden|denied|access denied|requires? authentication|authentication required)\b/i;
+
 function technicalAreaFromSurface(surface: CompanySurface): string {
   const paths = surface.discovered_pages.map(p => (p.path || '').toLowerCase()).filter(Boolean);
   if (paths.some(p => p.startsWith('/status') || p.includes('incident'))) return 'observability status';
@@ -488,6 +500,16 @@ export class DeepProspectBuilder {
     const found: DeepFinding[] = [];
     const src: Evidence[] = Array.isArray(observations) ? observations : [];
 
+    // Adversarial corroboration (Part E): when the SAME public resource carries
+    // contradictory security postures — both "exposed without auth" AND
+    // "denied / 401-403" — the observation substrate is internally unreliable,
+    // so no defensible exposure/access finding can stand. Weaken to a LOW-
+    // confidence CONFLICTING_EVIDENCE finding. The build gate maps this to
+    // RESEARCH_MORE (never OUTREACH_READY). Checked FIRST so the contradiction
+    // short-circuits the normal exposure/access rules.
+    const conflict = this.detectConflictingEvidence(src);
+    if (conflict) return conflict;
+
     const sensitive = src.filter(e => (e.sensitive_fields || []).length > 0);
     if (sensitive.length > 0) {
       found.push(this.deepFinding(
@@ -591,7 +613,7 @@ export class DeepProspectBuilder {
     // Public exposure: repeatable unauthenticated behavior with explicit exposure language.
     const exposed = src.filter(e =>
       e.repeatable && e.tested_without_auth &&
-      /\b(unauthenticated|without\s+auth|publicly\s+accessible|open\s+to|exposed|disclosed|accessible\s+without|directory\s+listing|backup\s+file|debug=|env|config\s+exposed)\b/i.test(e.observed_behavior)
+      EXPOSURE_LANGUAGE_RE.test(e.observed_behavior)
     );
     if (exposed.length > 0) {
       found.push(this.deepFinding(
@@ -610,7 +632,7 @@ export class DeepProspectBuilder {
     // drives OUTREACH_READY — requires a corroborating defensible finding).
     const denied = src.filter(e =>
       e.repeatable && (e.status === 401 || e.status === 403) &&
-      /\b(unauthorized|forbidden|denied|access denied|requires? authentication|authentication required)\b/i.test(e.observed_behavior)
+      DENIAL_LANGUAGE_RE.test(e.observed_behavior)
     );
     if (denied.length > 0) {
       found.push(this.deepFinding(
@@ -629,6 +651,53 @@ export class DeepProspectBuilder {
     const valid = found.filter(f => f.evidence_ids.length > 0);
     valid.sort((a, b) => SEV[b.impact_severity] - SEV[a.impact_severity] || b.evidence_ids.length - a.evidence_ids.length);
     return valid.length ? valid[0] : null;
+  }
+
+  /**
+   * Adversarial corroboration (Part E): resolve contradictions among
+   * observations BEFORE they can be minted into a finding. When the same
+   * public resource is observed both as exposed-without-auth and as an
+   * auth-denied (401/403) boundary, the evidence is internally inconsistent —
+   * the "corroboration" an exposure/access finding would lean on is actually
+   * adversarial to its own claim. In that case we weaken to a LOW-confidence
+   * CONFLICTING_EVIDENCE finding (which the build gate maps to RESEARCH_MORE).
+   * Returns null when observations are consistent (no same-URL conflict).
+   */
+  private detectConflictingEvidence(src: Evidence[]): DeepFinding | null {
+    // Bucket observations by normalized public URL so a contradiction is scoped
+    // to the SAME resource (different resources may legitimately differ).
+    const byUrl = new Map<string, Evidence[]>();
+    for (const e of src) {
+      const k = (e.public_url || '').replace(/\/$/, '');
+      if (!k) continue;
+      const bucket = byUrl.get(k) || [];
+      bucket.push(e);
+      byUrl.set(k, bucket);
+    }
+
+    for (const [, bucket] of byUrl) {
+      if (bucket.length < 2) continue;
+      const exposed = bucket.filter(e =>
+        e.repeatable && e.tested_without_auth && EXPOSURE_LANGUAGE_RE.test(e.observed_behavior)
+      );
+      const denied = bucket.filter(e =>
+        e.repeatable && (e.status === 401 || e.status === 403) && DENIAL_LANGUAGE_RE.test(e.observed_behavior)
+      );
+      if (exposed.length > 0 && denied.length > 0) {
+        const both = [...exposed, ...denied];
+        const url = both[0].public_url || 'the resource';
+        return this.deepFinding(
+          'CONFLICTING_EVIDENCE', 'LOW',
+          `Conflicting public observations on ${url}: both unauthenticated-exposure and auth-denied (401/403) postures were recorded for the same resource.`,
+          both,
+          Array.from(new Set(both.map(e => e.public_url))),
+          'Repeated observations of the same public resource contradict each other — one indicates unauthenticated exposure, another a 401/403 authentication boundary. The observation substrate is therefore unreliable for any exposure/access claim.',
+          'Re-observe the resource under a controlled, identical request sequence to resolve the contradiction. Do not treat exposure or access claims as defensible until the conflict is resolved.',
+          'LOW', 'LOW', 'LOW', 'LOW', 'LOW', 'LOW'
+        );
+      }
+    }
+    return null;
   }
 
   private deepFinding(

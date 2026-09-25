@@ -62,11 +62,20 @@ export class DomainResolver {
         const unique = Array.from(new Set(domains));
         const consistent = unique.length === 1 && unique[0];
         if (consistent) {
+          // All observed official-domain signals agree. Prefer the most
+          // authoritative signal actually observed: canonical <link> tag first,
+          // then the og:url meta, then the redirect destination. This makes the
+          // full chain (GROWJO_DOMAIN -> PUBLIC_REDIRECT -> GROWJO_HOMEPAGE_CANONICAL
+          // -> OGP_URL) a real, observable resolution path — never a guess.
+          const method: CompanyResolution['resolution_method'] = canonical
+            ? 'GROWJO_HOMEPAGE_CANONICAL'
+            : ogUrl ? 'OGP_URL' : 'PUBLIC_REDIRECT';
+          const source = canonical ?? ogUrl ?? finalUrl;
           return {
             canonical_name: seed.company_name.trim(),
             official_domain: consistent,
-            resolution_method: canonical ? 'GROWJO_HOMEPAGE_CANONICAL' : 'PUBLIC_REDIRECT',
-            resolution_source: finalUrl,
+            resolution_method: method,
+            resolution_source: source,
             resolution_confidence: 'HIGH',
           };
         }
@@ -78,26 +87,6 @@ export class DomainResolver {
             resolution_method: 'AMBIGUOUS',
             resolution_source: `Conflicting canonical/og:url/redirect targets: ${unique.join(', ')}`,
             resolution_confidence: 'LOW',
-          };
-        }
-        // Only the redirect target is available.
-        const d = unique[0];
-        if (d) {
-          return {
-            canonical_name: seed.company_name.trim(),
-            official_domain: d,
-            resolution_method: 'PUBLIC_REDIRECT',
-            resolution_source: finalUrl,
-            resolution_confidence: 'MEDIUM',
-          };
-        }
-        if (ogUrl) {
-          return {
-            canonical_name: seed.company_name.trim(),
-            official_domain: DomainResolver.canonicalizeDomain(ogUrl),
-            resolution_method: 'OGP_URL',
-            resolution_source: ogUrl,
-            resolution_confidence: 'MEDIUM',
           };
         }
       } catch (e) {

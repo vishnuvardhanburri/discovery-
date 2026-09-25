@@ -72,8 +72,11 @@ export interface DeepSignal {
 // ── Contactability ───────────────────────────────────────────────────────────
 
 export type ContactKind =
-  | 'PROFESSIONAL_PROFILE'   // public LinkedIn / Twitter / GitHub profile link
-  | 'PROFESSIONAL_EMAIL'     // public mailto: or directory email
+  | 'PROFESSIONAL_PROFILE'   // public LinkedIn / Twitter / GitHub profile link (legacy)
+  | 'PROFILE'                // generic public professional profile link (non-LinkedIn)
+  | 'PROFESSIONAL_EMAIL'     // public mailto: or Growjo licensed professional email
+  | 'LINKEDIN'               // public LinkedIn profile link (Growjo or explicit)
+  | 'PHONE'                  // publicly listed professional phone number
   | 'PRESS_CONTACT'          // press / media contact
   | 'CONTACT_PAGE';          // a publicly linked contact page
 

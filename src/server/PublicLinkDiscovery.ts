@@ -44,7 +44,7 @@ export interface PublicLinkDiscoveryOptions {
 export const PROFESSIONAL_PATHS: Array<{ category: ProfessionalPageCategory; labels: string[] }> = [
   { category: 'team_people', labels: ['/team', '/leadership', '/people', '/our-team', '/team/'] },
   { category: 'engineering', labels: ['/engineering', '/technology', '/tech', '/developers', '/engineering-team'] },
-  { category: 'blog', labels: ['/blog', '/changelog', '/engineering/blog', '/medium'] },
+  { category: 'blog', labels: ['/blog', '/changelog'] },
   { category: 'docs', labels: ['/docs', '/documentation'] },
   { category: 'security', labels: ['/security', '/trust', '/trust-center'] },
   { category: 'status_ops', labels: ['/status', '/incidents', '/system-status'] },
@@ -197,18 +197,7 @@ export class PublicLinkDiscovery {
   }
 
   private static categorizePath(pathname: string): ProfessionalPageCategory {
-    const p = '/' + pathname.replace(/^\/+/, '').replace(/\/+$/, '');
-    const segments = p.split('/').filter(Boolean);
-    const first = segments[0] || '';
-    for (const { category, labels } of PROFESSIONAL_PATHS) {
-      for (const label of labels) {
-        const needle = label.replace(/^\/+/, '').replace(/\/$/, '');
-        if (p === '/' + needle || p.startsWith('/' + needle) || first === needle) {
-          return category;
-        }
-      }
-    }
-    return 'other';
+    return categorizeProfessionalPath(pathname);
   }
 
   private static extractSameOriginLinks(html: string, currentUrl: string, origin: string): string[] {
@@ -232,4 +221,29 @@ export class PublicLinkDiscovery {
     const m = /<title[^>]*>([^<]*)<\/title>/i.exec(html);
     return m ? m[1].trim() : undefined;
   }
+}
+
+/**
+ * Classify a pathname into a professional page category using PROFESSIONAL_PATHS.
+ *
+ * The matching rule: normalise the path to a leading-slash, no-trailing-slash
+ * form, then for each category check whether the normalised path is an exact
+ * match, a prefix match, or whose first segment matches a label needle.
+ *
+ * Exported so the cohesive PublicSourceGraph model shares the EXACT same
+ * taxonomy as PublicLinkDiscovery (single source of truth for classification).
+ */
+export function categorizeProfessionalPath(pathname: string): ProfessionalPageCategory {
+  const p = '/' + pathname.replace(/^\/+/, '').replace(/\/+$/, '');
+  const segments = p.split('/').filter(Boolean);
+  const first = segments[0] || '';
+  for (const { category, labels } of PROFESSIONAL_PATHS) {
+    for (const label of labels) {
+      const needle = label.replace(/^\/+/, '').replace(/\/$/, '');
+      if (p === '/' + needle || p.startsWith('/' + needle) || first === needle) {
+        return category;
+      }
+    }
+  }
+  return 'other';
 }

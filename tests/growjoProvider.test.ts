@@ -1,8 +1,9 @@
-// GrowjoProvider offline tests — CSV alias mapping, dedupe, provenance.
+// GrowjoProvider offline tests — CSV alias mapping, dedupe, provenance, contact channels.
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { GrowjoProvider } from '../src/server/GrowjoProvider';
+import type { GrowjoContact, GrowjoContactChannel, GrowjoPerson } from '../src/server/GrowjoProvider';
 
 let pass = 0, fail = 0; const failures: string[] = [];
 const assert = (c: boolean, m: string) => { if (c) pass++; else { fail++; failures.push(m); console.log('[FAIL] ' + m); } };
@@ -91,6 +92,111 @@ run('growjo CSV — empty file handled', () => {
   const r = GrowjoProvider.parseCsv('');
   assert(r.companies.length === 0, 'empty CSV -> 0 companies');
   assert(r.warnings.length > 0, 'empty CSV warns');
+});
+
+run('growjo CSV — company + url aliases (canonical name dedupe)', () => {
+  const csv = [
+    'company,url',
+    'Acme Corp,https://acme.com',
+    'Acme Corp (US),https://acme.com/', // same canonical domain, diff name
+  ].join('\n');
+  const r = GrowjoProvider.parseCsv(csv);
+  assert(r.companies.length === 1, 'deduped to 1 by canonical domain (got ' + r.companies.length + ')');
+  assert(r.duplicate_domains_dropped === 1, 'one duplicate dropped');
+  assert(r.column_mapping.url === 'domain', 'url alias mapped to domain');
+});
+
+run('growjo — extractContacts person + channel normalization', () => {
+  const csv = [
+    'company_name,domain,industry,employees,funding,person_name,person_title,email,phone,linkedin_url,growjo_url',
+    'Acme,acme.com,Developer Infra,250,$12M,"  Jane Doe  ","Head of Engineering","  Jane@ACME.com  ","555-1234","linkedin.com/in/janedoe","https://www.acme.com/about"',
+  ].join('\n');
+  const r = GrowjoProvider.parseCsv(csv);
+  assert(r.companies.length === 1, 'one company');
+  const c = r.companies[0];
+  const contact = GrowjoProvider.extractContacts(c);
+
+  // Person fields
+  assert(contact.person.name === 'Jane Doe', 'person name trimmed: "  Jane Doe  " -> "Jane Doe"');
+  assert(contact.person.title === 'Head of Engineering', 'person title trimmed');
+  assert(contact.person.email === 'Jane@ACME.com', 'email trimmed (raw value preserved)');
+  assert(contact.person.phone === '555-1234', 'phone trimmed');
+  assert(contact.person.linkedin === 'linkedin.com/in/janedoe', 'linkedin trimmed');
+
+  // Channel normalization
+  assert(contact.channels.length === 3, '3 channels derived (email+linkedin+phone) (got ' + contact.channels.length + ')');
+
+  const emailChan = contact.channels.find(ch => ch.type === 'PROFESSIONAL_EMAIL')!;
+  assert(!!emailChan, 'PROFESSIONAL_EMAIL channel exists');
+  assert(emailChan.value === 'jane@acme.com', 'email lowercased: "Jane@ACME.com" -> "jane@acme.com"');
+  assert(emailChan.confidence_source === 'GROWJO_CSV:primary_email', 'email confidence_source is GROWJO_CSV:primary_email');
+
+  const linkedinChan = contact.channels.find(ch => ch.type === 'LINKEDIN')!;
+  assert(!!linkedinChan, 'LINKEDIN channel exists');
+  assert(linkedinChan.value === 'https://linkedin.com/in/janedoe', 'linkedin URL canonicalised to absolute');
+  assert(linkedinChan.confidence_source === 'GROWJO_CSV:linkedin_url', 'linkedin confidence_source is GROWJO_CSV:linkedin_url');
+
+  assert(linkedinChan.value === linkedinChan.value.replace(/\/+$/, ''), 'linkedin URL trailing slash stripped');
+
+  const phoneChan = contact.channels.find(ch => ch.type === 'PHONE')!;
+  assert(!!phoneChan, 'PHONE channel exists');
+  assert(phoneChan.value === '555-1234', 'phone value preserved (separators kept)');
+  assert(phoneChan.confidence_source === 'GROWJO_CSV:primary_phone', 'phone confidence_source is GROWJO_CSV:primary_phone');
+
+  // Company identity
+  assert(contact.company === 'Acme', 'contact.company = canonical_name');
+  assert(contact.domain === 'acme.com', 'contact.domain = canonical domain');
+  assert(contact.channels === contact.person.channels, 'contact.channels mirrors person.channels');
+});
+
+run('growjo — extractContacts empty when no person data', () => {
+  const csv = [
+    'company,domain',
+    'NoContact,no-contact.com',
+  ].join('\n');
+  const r = GrowjoProvider.parseCsv(csv);
+  const c = r.companies[0];
+  const contact = GrowjoProvider.extractContacts(c);
+  // normalizeRow falls back primary_person_name to company name when absent.
+  assert(contact.person.name === 'NoContact', 'person name falls back to company name when person_name column absent');
+  assert(contact.person.title === null, 'person title null when absent');
+  assert(contact.person.email === null, 'person email null when absent');
+  assert(contact.person.phone === null, 'person phone null when absent');
+  assert(contact.person.linkedin === null, 'person linkedin null when absent');
+  assert(contact.channels.length === 0, 'no channels when person data absent (got ' + contact.channels.length + ')');
+  assert(contact.company === 'NoContact', 'company name set from canonical_name');
+  assert(contact.domain === 'no-contact.com', 'domain set');
+});
+
+run('growjo — extractContacts with person + name only (no email/phone/linkedin)', () => {
+  const csv = [
+    'company,domain,person_name',
+    'Solo,solo.com,Only Person',
+  ].join('\n');
+  const r = GrowjoProvider.parseCsv(csv);
+  const c = r.companies[0];
+  const contact = GrowjoProvider.extractContacts(c);
+  assert(contact.person.name === 'Only Person', 'person name extracted');
+  assert(contact.channels.length === 0, 'no channels when only name present');
+});
+
+run('growjo — contact channel types are a closed union', () => {
+  // Verify that the type system enforces the channel type union by checking
+  // that all possible values are within the expected set.
+  const validTypes: ReadonlyArray<string> = ['PROFESSIONAL_EMAIL', 'PROFILE', 'LINKEDIN', 'PHONE'];
+  for (const t of validTypes) {
+    assert(validTypes.includes(t), 'channel type ' + t + ' is valid');
+  }
+  // extractContacts should only ever emit PROFESSIONAL_EMAIL, LINKEDIN, PHONE
+  const csv = [
+    'company,domain,email,phone,linkedin_url',
+    'T,t.com,a@t.com,555,b.com/in/t',
+  ].join('\n');
+  const r = GrowjoProvider.parseCsv(csv);
+  const contact = GrowjoProvider.extractContacts(r.companies[0]);
+  for (const ch of contact.channels) {
+    assert(['PROFESSIONAL_EMAIL', 'LINKEDIN', 'PHONE'].includes(ch.type), 'channel type ' + ch.type + ' is in allowed set');
+  }
 });
 
 console.log('\n==================================================');

@@ -17,6 +17,57 @@ export interface GrowjoImportResult {
   warnings: string[];
 }
 
+// ── Normalized contact model (self-contained, no DeepTypes dependency) ───────
+
+/**
+ * Channel type for a normalized contact method extracted from a Growjo record.
+ * These mirror the public contact kinds the outreach engine consumes, but are
+ * scoped to Growjo-sourced lead data only.
+ */
+export type GrowjoContactChannelType =
+  | 'PROFESSIONAL_EMAIL'  // public / directory professional email
+  | 'PROFILE'             // generic public professional profile (non-LinkedIn)
+  | 'LINKEDIN'            // LinkedIn public profile URL
+  | 'PHONE';              // publicly listed phone number
+
+/**
+ * A single normalized contact channel derived from a Growjo company record.
+ * The `confidence_source` preserves provenance: which CSV column alias or
+ * nested field produced this value (e.g. 'GROWJO_CSV:primary_email').
+ */
+export interface GrowjoContactChannel {
+  type: GrowjoContactChannelType;
+  value: string;
+  /** Traceable origin of this channel value (column alias / field within the Growjo record). */
+  confidence_source: string;
+}
+
+/**
+ * A normalized person extracted from a Growjo company record.
+ * Fields map one-to-one to the canonical GrowjoCompany primary-* fields,
+ * and `channels` is the derived, normalized contact-channel list.
+ */
+export interface GrowjoPerson {
+  name: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  linkedin: string | null;
+  /** Normalized, non-empty contact channels derived from this person. */
+  channels: GrowjoContactChannel[];
+}
+
+/**
+ * A contact bundle for a Growjo company: the company identity plus the
+ * normalized primary person and their contact channels.
+ */
+export interface GrowjoContact {
+  company: string;
+  domain: string | null;
+  person: GrowjoPerson;
+  channels: GrowjoContactChannel[];
+}
+
 /** Canonical target key -> list of accepted CSV header aliases (lowercased/trimmed). */
 const COLUMN_ALIASES: Record<string, string[]> = {
   company: ['company', 'company_name', 'name'],
@@ -87,6 +138,71 @@ export class GrowjoProvider {
 
     return { companies, column_mapping: columnMapping, total_rows: dataRows.length, duplicate_domains_dropped: dupDropped, warnings };
   }
+
+  /**
+   * Build a normalized GrowjoContact (person + channels) from a parsed company.
+   * Only public contact information legitimately licensed from Growjo is captured.
+   * Each channel's `confidence_source` records the originating Growjo field.
+   */
+  static extractContacts(company: GrowjoCompany): GrowjoContact {
+    const person: GrowjoPerson = {
+      name: trimNullOrEmpty(company.primary_person_name),
+      title: trimNullOrEmpty(company.primary_title),
+      email: trimNullOrEmpty(company.primary_email),
+      phone: trimNullOrEmpty(company.primary_phone),
+      linkedin: trimNullOrEmpty(company.linkedin_url),
+      channels: [],
+    };
+
+    const channels: GrowjoContactChannel[] = [];
+    if (person.email) {
+      channels.push({ type: 'PROFESSIONAL_EMAIL', value: normalizeChannelValue('PROFESSIONAL_EMAIL', person.email), confidence_source: 'GROWJO_CSV:primary_email' });
+    }
+    if (person.linkedin) {
+      channels.push({ type: 'LINKEDIN', value: normalizeChannelValue('LINKEDIN', person.linkedin), confidence_source: 'GROWJO_CSV:linkedin_url' });
+    }
+    if (person.phone) {
+      channels.push({ type: 'PHONE', value: normalizeChannelValue('PHONE', person.phone), confidence_source: 'GROWJO_CSV:primary_phone' });
+    }
+
+    person.channels = channels;
+
+    return {
+      company: company.canonical_name,
+      domain: company.domain,
+      person,
+      channels,
+    };
+  }
+}
+
+function trimNullOrEmpty(v: string | null | undefined): string | null {
+  if (!v) return null;
+  const t = v.trim();
+  return t.length ? t : null;
+}
+
+/** Light normalization of a channel value based on its type. Preserves provenance. */
+function normalizeChannelValue(type: GrowjoContactChannelType, value: string): string {
+  const v = value.trim();
+  if (type === 'PROFESSIONAL_EMAIL') {
+    // Emails are case-insensitive; lowercase the domain portion only.
+    const at = v.lastIndexOf('@');
+    if (at > 0) return v.slice(0, at).toLowerCase() + v.slice(at).toLowerCase();
+    return v.toLowerCase();
+  }
+  if (type === 'LINKEDIN') {
+    // Ensure LinkedIn URLs are absolute and canonicalised.
+    let u = v;
+    if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+    return u.replace(/\/+$/, '');
+  }
+  if (type === 'PHONE') {
+    // Keep digits, +, and separators; trim surrounding whitespace.
+    return v.replace(/^\s+|\s+$/g, '');
+  }
+  // PROFILE: leave as-is (already trimmed).
+  return v;
 }
 
 function normalizeRow(raw: Record<string, string>, retrievedAt: string, source_url: string | undefined, columnMapping: Record<string, string>): GrowjoCompany | null {

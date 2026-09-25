@@ -12,6 +12,7 @@
     "src/server/IntelligenceEngine.ts",
     "src/server/LivePublicObservationProvider.ts",
     "src/server/PublicLinkDiscovery.ts",
+    "src/server/PublicSourceGraph.ts",
     "src/server/PeopleExtractor.ts",
     "src/server/OwnerSelector.ts",
     "src/server/DeepTypes.ts",
@@ -34,6 +35,10 @@
     "tests/growjoProvider.test.ts",
     "tests/companyQueue.test.ts",
     "tests/findingEngine.test.ts",
-    "tests/orchestration.test.ts"
+    "tests/activity.test.ts",
+    "tests/peopleOwner.test.ts",
+    "tests/orchestration.test.ts",
+    "tests/sourceGraph.test.ts",
+    "tests/email.test.ts"
   ]
 }

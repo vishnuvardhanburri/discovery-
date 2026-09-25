@@ -1,27 +1,42 @@
 /**
  * XAVIRA — CONTACTABILITY FINDER (additive)
  * ─────────────────────────────────────────────────────────────────────────────
- * Captures ONLY professional contact information that is publicly available on
- * the discovered company surface: public profile links (LinkedIn/Twitter/GitHub),
- * mailto: addresses, and contact/press pages.
+ * Captures ONLY professional contact information from two provenance-trusted
+ * channels:
  *
- * It NEVER guesses, constructs, or derives an email address. Contactability is
- * a hard gate for the deep funnel (an outreach angle needs a usable channel).
+ *   1. Growjo licensed lead data — PROFESSIONAL_EMAIL / LINKEDIN / PHONE / PROFILE
+ *      channels are extracted from the operator-supplied GrowjoCompany record
+ *      via GrowjoProvider.extractContacts. Only fields explicitly present in
+ *      the licensed record are captured.
+ *   2. Public company surface — mailto: addresses, tel: links, public
+ *      profile links (LinkedIn/Twitter/GitHub), and contact/press pages
+ *      discovered on the company's own domain.
+ *
+ * Channel types produced: PROFESSIONAL_EMAIL, PROFILE, PHONE, LINKEDIN,
+ * PROFESSIONAL_PROFILE, PRESS_CONTACT, CONTACT_PAGE.
+ *
+ * It NEVER guesses, constructs, or derives an email address. A contact value
+ * must be explicitly published (mailto:/tel: on a page) or explicitly licensed
+ * (Growjo). Role accounts (info@, sales@, …) are always filtered out.
  */
 
-import type { DeepContact, ContactConfidence } from './DeepTypes';
+import type { DeepContact, ContactConfidence, GrowjoCompany } from './DeepTypes';
 import type { DiscoveredPage } from './IntelligenceCase';
+import { GrowjoProvider } from './GrowjoProvider';
 
 const PROFILE_HANDLE_RE = /href=["'](?:https?:)?\/\/(?:www\.)?(?:linkedin\.com\/in|twitter\.com|x\.com)\/([A-Za-z0-9._-]+)\/??[^"']*["']/i;
 const MAIlTO_RE = /href=["']mailto:([^"']+)["']/i;
-const CONTACT_PAGE_RE = /href=["']([^"']*(?:\/contact|\/press|\/media|\/contact-us)(?:\/|$|\?)["'])/i;
+const TEL_RE = /^tel:(.+)/i;
+const CONTACT_PAGE_RE = /\/(?:contact|press|media|contact-us)(?:[\/?#"'-]|$)/i;
 
 function confidenceFor(type: DeepContact['type'], value: string): ContactConfidence {
   if (type === 'PROFESSIONAL_EMAIL') return 'HIGH';
-  if (type === 'PROFESSIONAL_PROFILE') {
+  if (type === 'PROFESSIONAL_PROFILE' || type === 'PROFILE') {
     // A real handle /in/<handle> or @<handle> path is high; a share/intent link is medium.
-    return /@|linkedIn\.com\/in\//i.test(value) ? 'HIGH' : 'MEDIUM';
+    return /@|linkedin\.com\/in\//i.test(value) ? 'HIGH' : 'MEDIUM';
   }
+  if (type === 'LINKEDIN') return 'HIGH';
+  if (type === 'PHONE') return 'HIGH';
   if (type === 'PRESS_CONTACT') return 'MEDIUM';
   return 'LOW';
 }
@@ -47,7 +62,8 @@ export class ContactabilityFinder {
   static find(
     pages: DiscoveredPage[],
     htmlByUrl: Map<string, string>,
-    onProgress?: (stage: string, message: string) => void
+    onProgress?: (stage: string, message: string) => void,
+    growjoData?: GrowjoCompany | null
   ): DeepContact[] {
     const contacts: DeepContact[] = [];
     const seen = new Set<string>();
@@ -58,6 +74,23 @@ export class ContactabilityFinder {
       seen.add(key);
       contacts.push(c);
     };
+
+    // ── Growjo-licensed contact channels (never guessed — only licensed data) ──
+    // PROFESSIONAL_EMAIL / LINKEDIN / PHONE / PROFILE are captured ONLY when the
+    // Growjo lead record explicitly provides them. Role accounts are filtered out.
+    if (growjoData) {
+      const growjoContact = GrowjoProvider.extractContacts(growjoData);
+      const gSrc = resolveGrowjoSource(growjoData);
+      for (const channel of growjoContact.channels) {
+        if (channel.type === 'PROFESSIONAL_EMAIL') {
+          if (!isRoleAccount(channel.value) && looksProfessional(channel.value)) {
+            add({ type: 'PROFESSIONAL_EMAIL', value: channel.value, source_url: gSrc, confidence: 'HIGH', note: `Growjo licensed email (${channel.confidence_source}).` });
+          }
+        } else {
+          add({ type: channel.type, value: channel.value, source_url: gSrc, confidence: 'HIGH', note: `Growjo licensed contact (${channel.confidence_source}).` });
+        }
+      }
+    }
 
     for (const page of pages) {
       const html = htmlByUrl.get(page.url);
@@ -76,6 +109,16 @@ export class ContactabilityFinder {
           continue;
         }
 
+        // tel: links — public phone numbers published on the company page.
+        const telMatch = TEL_RE.exec(href);
+        if (telMatch && telMatch[1]) {
+          const phone = telMatch[1].trim();
+          if (/\d/.test(phone)) {
+            add({ type: 'PHONE', value: phone, source_url: page.url, confidence: confidenceFor('PHONE', phone), note: 'Public phone number link (tel:) on company page.' });
+          }
+          continue;
+        }
+
         const abs = normalizeHref(href, page.url);
         if (!abs) continue;
 
@@ -87,7 +130,7 @@ export class ContactabilityFinder {
         }
 
         // Generic press / media contact page.
-        if (CONTACT_PAGE_RE.test(`href="${href}"`)) {
+        if (CONTACT_PAGE_RE.test(href)) {
           add({ type: 'CONTACT_PAGE', value: abs, source_url: page.url, confidence: 'MEDIUM', note: 'Public contact/press page link.' });
           continue;
         }
@@ -103,7 +146,9 @@ export class ContactabilityFinder {
     return contacts.some(c =>
       c.type === 'PROFESSIONAL_EMAIL' ||
       c.type === 'PROFESSIONAL_PROFILE' ||
-      c.type === 'PRESS_CONTACT'
+      c.type === 'PROFILE' ||
+      c.type === 'LINKEDIN' ||
+      c.type === 'PHONE'
     );
   }
 }
@@ -119,4 +164,9 @@ function normalizeHref(href: string, baseUrl: string): string {
 
 function looksProfessional(email: string): boolean {
   return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(email);
+}
+
+/** Resolve the attributable public source URL for a Growjo lead record. */
+function resolveGrowjoSource(company: GrowjoCompany): string {
+  return company.source_url || company.growjo_url || company.website || '';
 }

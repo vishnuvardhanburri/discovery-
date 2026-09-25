@@ -54,7 +54,10 @@ export class DeepOwnerResolver {
     const responsibility = candidate.relationship_to_area || `Role '${candidate.role}' covers ${technicalArea}.`;
     const subsystem = subsystemFromFinding(classification, resolvedEvidence) || technicalArea || 'platform engineering';
 
-    const confidence: OwnerConfidence = (candidate.confidence as OwnerConfidence) || 'LOW';
+    // Confidence is HIGH here: the gate above rejects anything that is not
+    // explicitly HIGH. LOW/MEDIUM candidates never reach this point and are
+    // never promoted.
+    const confidence: OwnerConfidence = 'HIGH';
 
     return {
       name: candidate.name,
@@ -63,10 +66,27 @@ export class DeepOwnerResolver {
       source_urls: candidate.source_urls,
       owner_evidence: candidate.evidence.length
         ? candidate.evidence
-        : [sel.ownerEvidenceString],
+        : [DeepOwnerResolver.buildEvidenceString(candidate)],
       responsibility_match: responsibility,
       confidence,
       finding_link: subsystem
     };
+  }
+
+  /**
+   * Build the canonical owner-evidence string in the EXACT format consumed
+   * downstream as an explicit, evidence-backed public owner listing:
+   *
+   *   `<name> is listed as <role> on <url> — "<excerpt>"`
+   *
+   * The excerpt is a verbatim snippet taken from the candidate's public
+   * evidence (empty string when the candidate carries no verbatim excerpt).
+   * This never fabricates a role, name, or source — every field is taken
+   * directly from the candidate record.
+   */
+  static buildEvidenceString(candidate: OwnerCandidate): string {
+    const url = candidate.source_urls?.[0] || '';
+    const excerpt = candidate.evidence?.[0] || '';
+    return `${candidate.name} is listed as ${candidate.role} on ${url} — "${excerpt}"`;
   }
 }

@@ -132,7 +132,7 @@ export class CompanyQueue {
     finding: string | null,
     owner: string | null,
     artifact_path: string | null,
-    nextState: 'OUTREACH_READY' | 'RESEARCH_MORE' | 'NO_GO',
+    nextState: 'OUTREACH_READY' | 'RESEARCH_MORE' | 'NO_GO' | 'CONTACT_READY',
     error?: string | null
   ): QueuedCompany | null {
     const row = this.byId(id);
@@ -151,7 +151,7 @@ export class CompanyQueue {
   approve(id: string): QueuedCompany | null {
     const row = this.byId(id);
     if (!row) return null;
-    if (row.state === 'OUTREACH_READY') { row.state = 'APPROVED'; row.updated_at = new Date().toISOString(); this.save(row); }
+    if (row.state === 'OUTREACH_READY' || row.state === 'CONTACT_READY') { row.state = 'APPROVED'; row.updated_at = new Date().toISOString(); this.save(row); }
     return row;
   }
 
@@ -166,6 +166,6 @@ export class CompanyQueue {
 
   /** Resume list: everything not in a terminal state, in enqueue order. */
   pending(): QueuedCompany[] {
-    return this.rows.filter(r => !['APPROVED', 'SENT'].includes(r.state));
+    return this.rows.filter(r => !['NO_GO', 'APPROVED', 'SENT'].includes(r.state));
   }
 }

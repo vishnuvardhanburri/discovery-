@@ -27,12 +27,16 @@ import type {
   OwnerCandidate, CompanySurface, DiscoveredPage,
   PublicObservationProvider
 } from './IntelligenceCase';
+import type {
+  FindingClassification, EvidenceClaim
+} from './IntelligenceCase';
 import type { Fetcher } from './PublicLinkDiscovery';
 import { DeepProspectBuilder } from './DeepProspectBuilder';
+import { DeepEmailGenerator } from './DeepEmailGenerator';
 import { GrowjoProvider } from './GrowjoProvider';
 import { CompanyQueue } from './CompanyQueue';
 import { DomainResolver } from './DomainResolver';
-import type { DeepProspect, DeepStage, GrowjoCompany, CompanyResolution, QueueState } from './DeepTypes';
+import type { DeepProspect, DeepStage, GrowjoCompany, CompanyResolution, QueueState, DeepOwner, DeepFinding } from './DeepTypes';
 
 export interface XaviraOperatorOptions {
   /** Injectable fetcher used by discovery + observation provider. */
@@ -142,6 +146,7 @@ export class XaviraOperator {
       switch (command) {
         case 'research':  await this.cmdResearch(args); break;
         case 'deep':      await this.cmdDeep(args); break;
+        case 'discover':  await this.cmdDiscover(args); break;
         case 'import':    await this.cmdImport(args); break;
         case 'hunt':      await this.cmdHunt(args); break;
         case 'pipeline':  this.cmdPipeline(); break;
@@ -292,6 +297,77 @@ export class XaviraOperator {
     return caseResult;
   }
 
+  /** discover <company-url|domain> — run PublicLinkDiscovery, print discovered pages + classifications + sameAs. */
+  async cmdDiscover(target: string): Promise<void> {
+    const t = (target || '').trim();
+    if (!t) {
+      this.println('Usage: discover <company-url-or-domain>');
+      return;
+    }
+    let parsed: URL;
+    try { parsed = new URL(t.startsWith('http') ? t : `https://${t}`); }
+    catch { this.println(`Invalid URL/domain: ${t}`); return; }
+
+    this.println(`\n=== DISCOVERY: ${parsed.hostname} ===`);
+    this.progress('company', 'discovering public company surface', parsed.hostname);
+
+    const htmlByUrl = new Map<string, string>();
+    let surface: CompanySurface;
+    try {
+      surface = await PublicLinkDiscovery.discover(parsed.href, {
+        maxPages: this.maxDiscoveryPages,
+        delayMs: this.discoveryDelayMs,
+        timeoutMs: this.discoveryTimeoutMs,
+        fetcher: this.fetcher,
+        logger: (m) => this.println(`  ${m}`),
+        onProgress: (page) => this.println(`  [pages] ${page.category}  ${page.path}  (HTTP ${page.status ?? '?'})`),
+        onHtml: (url, html) => { htmlByUrl.set(url, html); }
+      });
+    } catch (e: any) {
+      this.println(`Discovery failed: ${e?.message || String(e)}`);
+      return;
+    }
+
+    this.println('\nDiscovered pages:');
+    for (const p of surface.discovered_pages) {
+      this.println(`  • ${(p.category ?? 'unknown').padEnd(14)} ${p.url}`);
+    }
+
+    this.println('\nClassifications:');
+    const cats = surface.page_categories;
+    if (!cats || Object.keys(cats).length === 0) {
+      this.println('  (no categories populated)');
+    } else {
+      for (const [cat, urls] of Object.entries(cats)) {
+        this.println(`  ${cat} (${urls.length}):`);
+        for (const u of urls) this.println(`    • ${u}`);
+      }
+    }
+
+    // Extract JSON-LD sameAs links from discovered page HTML (same-origin professional links).
+    const sameAs: string[] = [];
+    for (const [, html] of htmlByUrl) {
+      const ldRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = ldRe.exec(html)) !== null) {
+        try {
+          const json: any = JSON.parse(m[1]);
+          const block: any = Array.isArray(json) ? json[0] : json;
+          const links: string[] = block?.sameAs || [];
+          for (const link of links) {
+            if (link && typeof link === 'string' && !sameAs.includes(link)) sameAs.push(link);
+          }
+        } catch { continue; }
+      }
+    }
+    this.println('\nsameAs (public professional links from JSON-LD):');
+    if (sameAs.length === 0) {
+      this.println('  (none discovered)');
+    } else {
+      for (const l of sameAs) this.println(`  • ${l}`);
+    }
+  }
+
   cmdStatus(): void {
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
     const c = this.currentCase;
@@ -317,6 +393,14 @@ export class XaviraOperator {
     // basic-case guard (a deep run may exist without a classic `research` case).
     if (sub === 'all') { this.cmdShowAll(); return; }
     if (sub.startsWith('company')) { this.cmdShowCompany(args.replace(/^company\s+/i, '').trim()); return; }
+
+    // Deep-path: when a deep prospect is active, `show findings` / `show people`
+    // surface the deep-layer data (DeepFinding with evidence_ids, DeepOwner graph).
+    if (this.currentDeep) {
+      if (sub.startsWith('findings')) { this.cmdShowDeepFindings(); return; }
+      if (sub.startsWith('people')) { this.cmdShowDeepPeople(); return; }
+    }
+
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
     const c = this.currentCase;
 
@@ -404,7 +488,121 @@ export class XaviraOperator {
     }
   }
 
+  /** Deep-path: show currentDeep.findings + deep_finding with evidence_ids. */
+  private cmdShowDeepFindings(): void {
+    const p = this.currentDeep!;
+    this.println(`\n=== DEEP FINDINGS ===`);
+    this.println(`Company:        ${p.company}`);
+    this.println(`Decision:       ${p.decision} (confidence ${p.confidence})`);
+    this.println(`Finding type:   ${p.deep_finding ? p.deep_finding.finding_type : (p.findings ? p.findings.finding_type : 'NONE')}`);
+
+    // Engine-level FindingClassification (carried through from the IntelligenceCase).
+    this.println(`\nEngine finding classification:`);
+    if (p.findings) {
+      this.println(`  type:     ${p.findings.finding_type}`);
+      this.println(`  severity: ${p.findings.impact_severity}`);
+      this.println(`  basis:    ${p.findings.severity_basis}`);
+    } else {
+      this.println(`  (engine did not classify a finding)`);
+    }
+
+    // Deep-layer finding with evidence_ids (the GAP output).
+    this.println(`\nDeep finding (evidence-attributed):`);
+    const df: DeepFinding | null = p.deep_finding;
+    if (df) {
+      this.println(`  type:         ${df.finding_type}`);
+      this.println(`  severity:     ${df.impact_severity}`);
+      this.println(`  basis:        ${df.severity_basis}`);
+      this.println(`  provenance:   ${df.provenance}`);
+      this.println(`  confidence:   ${df.confidence}`);
+      this.println(`  strength:`);
+      this.println(`    evidence_strength:     ${df.strength.evidence_strength}`);
+      this.println(`    reproducibility:       ${df.strength.reproducibility}`);
+      this.println(`    source_quality:        ${df.strength.source_quality}`);
+      this.println(`    technical_specificity: ${df.strength.technical_specificity}`);
+      this.println(`    owner_confidence:      ${df.strength.owner_confidence}`);
+      this.println(`  evidence_ids:`);
+      df.evidence_ids.forEach(id => this.println(`    • ${id}`));
+      this.println(`  source_urls:`);
+      df.source_urls.forEach(u => this.println(`    • ${u}`));
+      this.println(`  explanation:    ${df.explanation}`);
+      this.println(`  recommendation: ${df.recommendation}`);
+    } else {
+      this.println(`  (no defensible deep finding assembled — not fabricated)`);
+    }
+
+    this.println(`\nEvidence (${p.evidence.length} observations):`);
+    for (const e of p.evidence) {
+      this.println(`  • [${e.evidence_origin}] ${e.source_type}  ${e.public_url}  (HTTP ${e.status ?? '?'})  id=${e.id}`);
+    }
+  }
+
+  /** Deep-path: show currentDeep.people + selected_owner. */
+  private cmdShowDeepPeople(): void {
+    const p = this.currentDeep!;
+    this.println(`\n=== DEEP PEOPLE / OWNER CANDIDATES ===`);
+    this.println(`People (${p.people.length}):`);
+    if (p.people.length === 0) {
+      this.println('  (no publicly listed persons matched candidate technical roles)');
+    } else {
+      for (const cand of p.people) {
+        this.println(`\n  • ${cand.name} — ${cand.role}  [${cand.confidence}]`);
+        this.println(`    company:       ${cand.company}`);
+        this.println(`    source_urls:   ${cand.source_urls.join(', ')}`);
+        this.println(`    relationship:  ${cand.relationship_to_area}`);
+        this.println(`    explicit_evidence: ${cand.explicit_evidence}`);
+        this.println(`    evidence:`);
+        for (const ev of cand.evidence) this.println(`      • ${ev.slice(0, 200)}`);
+      }
+    }
+
+    this.println(`\nSelected owner (DeepOwner):`);
+    const o: DeepOwner | null = p.selected_owner;
+    if (o) {
+      this.println(`  name:               ${o.name}`);
+      this.println(`  role:               ${o.role}`);
+      this.println(`  company:            ${o.company}`);
+      this.println(`  confidence:         ${o.confidence}`);
+      this.println(`  responsibility_match: ${o.responsibility_match}`);
+      this.println(`  finding_link:       ${o.finding_link || '(none)'}`);
+      this.println(`  source_urls:        ${o.source_urls.join(', ')}`);
+      this.println(`  owner_evidence:`);
+      for (const ev of o.owner_evidence) this.println(`    • ${ev.slice(0, 200)}`);
+    } else {
+      this.println(`  (no evidence-backed owner — confidence LOW)`);
+    }
+  }
+
   cmdWhyOwner(): void {
+    // Deep-path: when a deep prospect is active, surface the DeepOwner graph
+    // (owner_evidence + confidence + finding_link) rather than the engine-only owner.
+    if (this.currentDeep) {
+      const o = this.currentDeep.selected_owner;
+      this.println(`\n=== WHY OWNER (DEEP) ===`);
+      if (!o) {
+        this.println('No evidence-backed owner was selected for the deep prospect.');
+        this.println('An owner requires an explicitly HIGH-confidence public person on a people-context page.');
+      } else {
+        this.println(`Selected owner:     ${o.name} — ${o.role}`);
+        this.println(`Confidence:         ${o.confidence}`);
+        this.println(`Finding link:       ${o.finding_link || '(none)'}`);
+        this.println(`Responsibility:     ${o.responsibility_match}`);
+        this.println(`Source URLs:`);
+        o.source_urls.forEach(u => this.println(`  • ${u}`));
+        this.println(`Owner evidence:`);
+        for (const ev of o.owner_evidence) this.println(`  • ${ev.slice(0, 200)}`);
+      }
+      // Engine-level lineage for end-to-end traceability.
+      const c = this.currentCase;
+      const eng = c?.technical_owner;
+      this.println(`\nEngine-verified owner (lineage):`);
+      this.println(`  owner name:     ${eng?.name || '(none)'}`);
+      this.println(`  owner source:   ${eng?.owner_source || 'NONE'}`);
+      this.println(`  owner evidence: ${eng?.owner_evidence}`);
+      this.println(`  confidence:     ${eng?.owner_confidence || 'LOW'}`);
+      this.println(`  verified:       ${eng?.verified_relevance}`);
+      return;
+    }
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
     const c = this.currentCase;
     const o = c.technical_owner;
@@ -433,6 +631,56 @@ export class XaviraOperator {
   }
 
   cmdDraftEmail(): void {
+    // Deep-path: when a deep prospect is active and OUTREACH_READY, reuse
+    // DeepEmailGenerator output to show the 9-section body + CLAIM→EVIDENCE map.
+    if (this.currentDeep) {
+      const p = this.currentDeep;
+      if (p.decision !== 'OUTREACH_READY' || !p.email_draft.generated) {
+        this.println('\n=== EMAIL DRAFT BLOCKED (DEEP) ===');
+        this.println(`Decision: ${p.decision} (email only drafted on OUTREACH_READY)`);
+        if (!p.email_draft.generated) {
+          this.println(`Blocked: ${p.email_draft.blocked_reason || 'gates not satisfied'}`);
+        } else {
+          this.println('Blocked: decision is not OUTREACH_READY.');
+        }
+        this.println('\nUse "why owner" to inspect owner reasoning, or re-run "deep research" with a stronger target.');
+        return;
+      }
+      // Reuse DeepEmailGenerator (already invoked during the deep build) to
+      // render the finding-led 9-section body from the current deep prospect.
+      const caseRef = p.case_ref;
+      if (!caseRef) {
+        this.println('No engine case reference for this deep prospect; cannot draft email.');
+        return;
+      }
+      const { email_draft: _omit, ...prospectForEmail } = p;
+      const draft = DeepEmailGenerator.generate(
+        { prospect: prospectForEmail, caseRef },
+        (stage, message) => this.progress(stage, message)
+      );
+      this.println('\n=== DEEP EMAIL DRAFT (NOT SENT) ===');
+      this.println(`To:      ${p.selected_owner ? p.selected_owner.name : 'technical owner'}`);
+      this.println(`Role:    ${p.selected_owner ? p.selected_owner.role : ''}`);
+      this.println(`From:    Vishnu (solo founder, XAVIRA)`);
+      this.println(`Subject: ${draft.primary_subject}`);
+      this.println(`Alt:     ${draft.alternate_subject}`);
+      this.println('--- 9-section body ---');
+      this.println(draft.body);
+      this.println('--- end ---\n');
+      this.println('CLAIM → EVIDENCE map:');
+      for (const claim of draft.claims) {
+        this.println(`\n  [${claim.claim_type}]`);
+        this.println(`  claim:       ${claim.text.slice(0, 200)}`);
+        this.println(`  evidence_ids:`);
+        if (claim.evidence_ids.length === 0) {
+          this.println(`    (none)`);
+        } else {
+          claim.evidence_ids.forEach(id => this.println(`    • ${id}`));
+        }
+      }
+      this.println('\nNEVER AUTO-SENT. Use "send --confirm" (requires configured transport + OUTREACH_READY).');
+      return;
+    }
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
     const c = this.currentCase;
     if (c.prospect_decision !== 'GO') {
@@ -717,12 +965,17 @@ export class XaviraOperator {
     this.println(`\nXAVIRA INTELLIGENCE OPERATOR — commands`);
     this.println(`  research <url>     Start a public-surface research run for a company URL.`);
     this.println(`                       Use "research again" to re-run the previous target.`);
+    this.println(`  discover <company>  Run PublicLinkDiscovery; print discovered pages + classifications + sameAs.`);
     this.println(`  status                  Show the current intelligence case status.`);
     this.println(`  show findings           Show finding classification, strength, thesis, uncertainty.`);
+    this.println(`                       When a deep run is active, prints currentDeep.findings + deep_finding (with evidence_ids).`);
     this.println(`  show evidence           List all evidence observations with lineage.`);
     this.println(`  show people             List owner candidates + engine-verified owner.`);
+    this.println(`                       When a deep run is active, prints currentDeep.people + selected_owner.`);
     this.println(`  why owner               Explain owner selection and confidence rationale.`);
+    this.println(`                       Deep path prints owner_evidence + confidence + finding_link.`);
     this.println(`  draft email             Show the finding-led draft email (if decision is GO).`);
+    this.println(`                       Deep path: OUTREACH_READY -> 9-section body + CLAIM→EVIDENCE map (reuses DeepEmailGenerator).`);
     this.println(`  export                  Persist/rewrite the intelligence artifact to disk.`);
     this.println(`  send [--confirm]        Record send intent (only if transport configured + confirmed).`);
     this.println(`  deep <url>              Deep-research a company (high-precision prospect dossier).`);

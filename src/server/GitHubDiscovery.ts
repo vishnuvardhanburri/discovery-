@@ -27,7 +27,7 @@ export interface GitHubDiscoveryResult {
   errors: string[];
 }
 
-const GITHUB_REPO_RE = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)(?:\/|$|\?[^\s"]*|#)|https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/(?:$|[^\s<"]+)/i;
+const GITHUB_REPO_RE = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)(?:\/|$|\?[^\s"]*|#)|https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/(?:$|[^\s<"]+)/gi;
 const GITHUB_ORG_RE = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)(?=\/|$|\s|<|"|\)|,)/gi;
 
 export class GitHubDiscovery {
@@ -68,7 +68,14 @@ export class GitHubDiscovery {
           headers: { accept: 'application/vnd.github+json', 'user-agent': 'xavira-discovery' },
           signal: opts.signal || AbortSignal.timeout(8000),
         });
-        remaining = parseInt((res.headers as any)?.['x-ratelimit-remaining'] ?? String(remaining), 10) || remaining;
+        // `res.headers` may be a real Headers object (use .get) or a plain
+        // record (mock fetchers). Bracket access on a Headers object returns
+        // undefined, so probe correctly before reading the rate-limit header.
+        const rh = typeof (res.headers as any)?.get === 'function'
+          ? (res.headers as any).get('x-ratelimit-remaining')
+          : (res.headers as any)?.['x-ratelimit-remaining'];
+        const parsed = typeof rh === 'string' ? parseInt(rh, 10) : NaN;
+        remaining = Number.isNaN(parsed) ? remaining : parsed;
         if (res.status === 403 && remaining === 0) { rateLimited = true; opts.onProgress?.('github', `Rate limited for org ${org}.`); break; }
         if (!res.ok) { errors.push(`github api ${res.status} for ${org}`); continue; }
         const list = await res.json() as GitHubRepo[];

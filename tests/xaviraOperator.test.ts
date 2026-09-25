@@ -26,6 +26,7 @@ import type {
   CompanySurface, DiscoveredPage
 } from '../src/server/IntelligenceCase';
 import type { HttpFetcher } from '../src/server/IntelligenceCase';
+import * as os from 'os';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CANNED HTML / FAKE TRANSPORT
@@ -111,6 +112,53 @@ function noPeopleRoutes(): Record<string, { status: number; body: string; ct?: s
   return {
     'https://acme.com': { status: 200, body: HOMEPAGE_HTML.replace(/<a href="\/team">Team<\/a>/, '').replace(/<a href="\/leadership">Leadership<\/a>/, ''), ct: 'text/html' },
   };
+}
+
+// ── Deep-path fixtures ──────────────────────────────────────────────────────
+
+/** Homepage that also carries JSON-LD sameAs links (for `discover` deep sameAs). */
+const DISCOVER_HOMEPAGE_HTML = `<!doctype html><html><head><title>Acme Corp</title>
+<script type="application/ld+json">{"sameAs":["https://github.com/acme","https://linkedin.com/company/acme","https://twitter.com/acme"]}</script>
+</head><body>
+<header><nav>
+<a href="https://acme.com/about">About</a>
+<a href="/team">Team</a>
+<a href="/leadership">Leadership</a>
+<a href="/engineering">Engineering</a>
+<a href="/blog">Blog</a>
+<a href="/security">Security</a>
+<a href="/careers">Careers</a>
+<a href="https://evil.example.com">Evil</a>
+</nav></header>
+<main><h1>Welcome to Acme</h1></main>
+</body></html>`;
+
+/** Developers page with a public mailto + professional profile (contact channel). */
+const DEV_CONTACT_HTML = `<html><body><h1>Developer Platform</h1>
+<p>We offer a REST API and SDK. Docs at /docs. Services run on Kubernetes.</p>
+<p>Follow the team on <a href="https://www.linkedin.com/in/janedoe">LinkedIn</a>.</p>
+<p>Contact: <a href="mailto:jane@acme.com">jane@acme.com</a></p>
+</body></html>`;
+
+/** Routes for `discover` test — homepage carries JSON-LD sameAs. */
+function discoverRoutes(): Record<string, { status: number; body: string; ct?: string }> {
+  return {
+    'https://acme.com': { status: 200, body: DISCOVER_HOMEPAGE_HTML, ct: 'text/html' },
+    'https://acme.com/robots.txt': { status: 200, body: 'User-agent: *\nDisallow: /private', ct: 'text/plain' },
+    'https://acme.com/sitemap.xml': { status: 200, body: '<urlset></urlset>', ct: 'application/xml' },
+    'https://acme.com/team': { status: 200, body: TEAM_HTML, ct: 'text/html' },
+    'https://acme.com/leadership': { status: 200, body: TEAM_HTML, ct: 'text/html' },
+    'https://acme.com/engineering': { status: 200, body: ENGINEERING_HTML, ct: 'text/html' },
+    'https://acme.com/blog': { status: 200, body: BLOG_HTML, ct: 'text/html' },
+    'https://acme.com/about': { status: 200, body: AMBIGUOUS_HTML, ct: 'text/html' },
+  };
+}
+
+/** Routes for deep READY-path tests — extends acmeRoutes with a contact page. */
+function deepReadyRoutes(): Record<string, { status: number; body: string; ct?: string }> {
+  const r = acmeRoutes();
+  r['https://acme.com/developers'] = { status: 200, body: DEV_CONTACT_HTML, ct: 'text/html' };
+  return r;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -457,6 +505,190 @@ async function main() {
     const out = cap.text();
     assert(out.includes('Intent recorded'), 'send records intent only');
     assert(!out.toLowerCase().includes('sent successfully') && !out.toLowerCase().includes('email delivered'), 'never auto-delivers');
+    delete process.env.XAVIRA_SMTP_HOST; delete process.env.XAVIRA_SMTP_USER; delete process.env.XAVIRA_SMTP_PASS;
+  });
+
+  // ── NEW: deep-path verbs + discover (fully offline via MockProvider/fake fetcher) ─
+
+  // 16. discover <company> — PublicLinkDiscovery + classifications + sameAs
+  await runTest('discover <company> — discovered pages + classifications + sameAs (offline)', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(discoverRoutes()),
+      saveArtifact: () => {},
+      output: cap.output,
+      maxDiscoveryPages: 20,
+      discoveryDelayMs: 0,
+      discoveryTimeoutMs: 2000,
+      observationDelayMs: 0,
+    });
+    await op.dispatch('discover https://acme.com');
+    const out = cap.text();
+    assert(out.includes('=== DISCOVERY:'), 'discover prints discovery header');
+    assert(out.includes('Discovered pages:'), 'discover prints discovered pages section');
+    assert(out.includes('/team'), 'discover shows /team page');
+    assert(out.includes('team_people'), 'discover shows team_people category');
+    assert(out.includes('engineering'), 'discover shows engineering category');
+    assert(out.includes('Classifications:'), 'discover prints classifications section');
+    assert(out.includes('sameAs'), 'discover prints sameAs section');
+    assert(out.includes('https://github.com/acme'), 'discover finds GitHub sameAs from JSON-LD');
+    assert(out.includes('https://linkedin.com/company/acme'), 'discover finds LinkedIn sameAs from JSON-LD');
+    assert(out.includes('https://twitter.com/acme'), 'discover finds Twitter sameAs from JSON-LD');
+    // domain-only form (no http://) is accepted
+    cap.buf.length = 0;
+    await op.dispatch('discover acme.com');
+    assert(cap.text().includes('=== DISCOVERY: acme.com'), 'discover accepts bare domain (acme.com)');
+  });
+
+  // 17. show findings (deep) — currentDeep.findings + deep_finding with evidence_ids
+  await runTest('show findings (deep) — deep_finding carries evidence_ids', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(acmeRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('show findings');
+    const out = cap.text();
+    assert(out.includes('DEEP FINDINGS'), 'deep show findings header present');
+    assert(out.includes('ev_go_test'), 'deep show findings surfaces evidence_ids');
+    assert(out.includes('POSSIBLE_SENSITIVE_METADATA_EXPOSURE'), 'deep show findings shows finding_type');
+    assert(out.includes('evidence_ids:'), 'deep show findings labels evidence_ids');
+    assert(out.includes('provenance:'), 'deep show findings shows provenance');
+  });
+
+  // 18. show people (deep) — currentDeep.people + selected_owner
+  await runTest('show people (deep) — people + selected_owner (DeepOwner)', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(acmeRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('show people');
+    const out = cap.text();
+    assert(out.includes('DEEP PEOPLE'), 'deep show people header present');
+    assert(out.includes('Jane Doe'), 'deep show people lists Jane Doe');
+    assert(out.includes('Selected owner (DeepOwner)'), 'deep show people shows selected owner section');
+    assert(out.includes('owner_evidence:'), 'deep show people shows owner_evidence');
+    assert(out.includes('finding_link:'), 'deep show people shows finding_link');
+  });
+
+  // 19. why owner (deep) — owner_evidence + confidence + finding_link
+  await runTest('why owner (deep) — owner_evidence + confidence + finding_link', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(acmeRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('why owner');
+    const out = cap.text();
+    assert(out.includes('WHY OWNER (DEEP)'), 'deep why owner header present');
+    assert(out.includes('Owner evidence:'), 'deep why owner shows owner_evidence');
+    assert(out.includes('Confidence:'), 'deep why owner shows confidence');
+    assert(out.includes('Finding link:'), 'deep why owner shows finding_link');
+    assert(out.includes('platform engineering'), 'deep why owner finding_link resolves to a subsystem');
+  });
+
+  // 20. draft email (deep, OUTREACH_READY) — 9-section body + CLAIM→EVIDENCE map
+  await runTest('draft email (deep, OUTREACH_READY) — 9-section body + CLAIM→EVIDENCE map', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(deepReadyRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('draft email');
+    const out = cap.text();
+    assert(out.includes('DEEP EMAIL DRAFT'), 'deep draft email header present');
+    assert(out.includes('9-section body'), 'deep draft email labels 9-section body');
+    assert(out.includes('CLAIM'), 'deep draft email shows CLAIM→EVIDENCE map');
+    assert(out.includes('solo founder'), 'deep draft email preserves founder identity');
+    assert(out.includes('NEVER AUTO-SENT'), 'deep draft email reminds never-auto-sent');
+    assert(out.includes('ev_go_test'), 'deep draft email claims reference evidence ids');
+  });
+
+  // 21. draft email (deep, RESEARCH_MORE) — blocked
+  await runTest('draft email (deep, non-OUTREACH_READY) — blocked with reason', async () => {
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(acmeRoutes()),          // no /developers contact page
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('draft email');
+    const out = cap.text();
+    assert(out.includes('EMAIL DRAFT BLOCKED (DEEP)'), 'deep non-READY draft shows blocked header');
+    assert(out.includes('Decision:'), 'deep non-READY draft shows decision');
+    assert(out.includes('OUTREACH_READY'), 'deep non-READY draft references OUTREACH_READY gate');
+  });
+
+  // 22. Send gate on deep path — send requires --confirm, blocks non-READY, never auto-sends
+  await runTest('send gate (deep) — requires --confirm; --confirm on OUTREACH_READY records intent only', async () => {
+    // Without transport configured
+    delete process.env.XAVIRA_SMTP_HOST; delete process.env.XAVIRA_SMTP_USER; delete process.env.XAVIRA_SMTP_PASS;
+    const cap = capture();
+    const op = new XaviraOperator({
+      fetch: fakeFetcher(deepReadyRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op.dispatch('send');
+    const noConfirm = cap.text();
+    assert(noConfirm.includes('Send requires explicit confirmation'), 'deep send without --confirm refused');
+    cap.buf.length = 0;
+    await op.dispatch('send --confirm');
+    const notConf = cap.text();
+    assert(notConf.includes('NOT configured'), 'deep send --confirm on OUTREACH_READY without transport refused');
+    // With transport configured + OUTREACH_READY + email generated
+    process.env.XAVIRA_SMTP_HOST = 'smtp.test';
+    process.env.XAVIRA_SMTP_USER = 'user';
+    process.env.XAVIRA_SMTP_PASS = 'pass';
+    const op2 = new XaviraOperator({
+      fetch: fakeFetcher(deepReadyRoutes()),
+      saveArtifact: () => {},
+      artifactsDir: os.tmpdir(),
+      output: cap.output,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      observationProvider: new MockProvider(goEvidence)
+    });
+    await op2.dispatch('deep research https://acme.com');
+    cap.buf.length = 0;
+    await op2.dispatch('send --confirm');
+    const sentOut = cap.text();
+    assert(sentOut.includes('Intent recorded'), 'deep send --confirm on OUTREACH_READY records intent');
+    assert(!sentOut.toLowerCase().includes('sent successfully') && !sentOut.toLowerCase().includes('email delivered'), 'deep send never auto-delivers');
     delete process.env.XAVIRA_SMTP_HOST; delete process.env.XAVIRA_SMTP_USER; delete process.env.XAVIRA_SMTP_PASS;
   });
 
