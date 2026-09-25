@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"],
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "erasableSyntaxOnly": false
+  },
+  "include": [
+    "src/server/IntelligenceCase.ts",
+    "src/server/IntelligenceEngine.ts",
+    "src/server/LivePublicObservationProvider.ts",
+    "src/server/PublicLinkDiscovery.ts",
+    "src/server/PeopleExtractor.ts",
+    "src/server/OwnerSelector.ts",
+    "src/server/DeepTypes.ts",
+    "src/server/DeepSignalExtractor.ts",
+    "src/server/ContactabilityFinder.ts",
+    "src/server/DeepOwnerResolver.ts",
+    "src/server/IcpQualificationEngine.ts",
+    "src/server/DeepEmailGenerator.ts",
+    "src/server/DeepProspectBuilder.ts",
+    "src/server/XaviraOperator.ts",
+    "scripts/xavira.ts",
+    "tests/acceptanceTest.ts",
+    "tests/xaviraOperator.test.ts",
+    "tests/deepOperator.test.ts"
+  ]
+}

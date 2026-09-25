@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build / runtime artifacts
+dist/
+.vite/
+.svelte-kit/
+.next/
+out/
+*.local
+
+# Generated intelligence dossiers (regenerable via `npm run xavira` / `deep`)
+artifacts/
+
+# Local env / secrets (never commit)
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
