@@ -39,6 +39,7 @@
     "tests/peopleOwner.test.ts",
     "tests/orchestration.test.ts",
     "tests/sourceGraph.test.ts",
-    "tests/email.test.ts"
+    "tests/email.test.ts",
+    "tests/ownerPipeline.test.ts"
   ]
 }

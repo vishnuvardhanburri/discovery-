@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "xavira": "tsx scripts/xavira.ts",
     "typecheck": "tsc -p tsconfig.xavira.json",
-    "test": "tsx tests/acceptanceTest.ts && tsx tests/xaviraOperator.test.ts && tsx tests/deepOperator.test.ts && tsx tests/growjoProvider.test.ts && tsx tests/companyQueue.test.ts && tsx tests/findingEngine.test.ts && tsx tests/sourceGraph.test.ts && tsx tests/activity.test.ts && tsx tests/orchestration.test.ts && tsx tests/peopleOwner.test.ts && tsx tests/email.test.ts"
+    "test": "tsx tests/acceptanceTest.ts && tsx tests/xaviraOperator.test.ts && tsx tests/deepOperator.test.ts && tsx tests/growjoProvider.test.ts && tsx tests/companyQueue.test.ts && tsx tests/findingEngine.test.ts && tsx tests/sourceGraph.test.ts && tsx tests/activity.test.ts && tsx tests/orchestration.test.ts && tsx tests/peopleOwner.test.ts && tsx tests/email.test.ts && tsx tests/ownerPipeline.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

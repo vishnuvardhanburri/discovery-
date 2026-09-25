@@ -32,13 +32,14 @@ import { DeepSignalExtractor } from '../src/server/DeepSignalExtractor';
 import { ContactabilityFinder } from '../src/server/ContactabilityFinder';
 import { IcpQualificationEngine } from '../src/server/IcpQualificationEngine';
 import { DeepEmailGenerator } from '../src/server/DeepEmailGenerator';
+import { GrowjoProvider } from '../src/server/GrowjoProvider';
 import { XaviraOperator } from '../src/server/XaviraOperator';
 import type {
   IntelligenceCase, Evidence, OwnerCandidate, CompanySurface,
   DiscoveredPage, PublicObservationProvider, ObservationResult
 } from '../src/server/IntelligenceCase';
 import type { HttpFetcher } from '../src/server/IntelligenceCase';
-import type { DeepProspect } from '../src/server/DeepTypes';
+import type { DeepProspect, GrowjoCompany, CompanyResolution } from '../src/server/DeepTypes';
 import type { IcpContext } from '../src/server/IcpQualificationEngine';
 
 // ── CANNED HTML ─────────────────────────────────────────────────────────────
@@ -465,6 +466,60 @@ async function main() {
     assert(prospect.people.length >= 1, 'people still discovered');
     assert(prospect.selected_owner !== null, 'owner still resolved (HIGH)');
     assert(prospect.contactability.length === 0, 'no contact channel (DEV_BARE has no mailto/profile)');
+  });
+
+  // 17. DEEP RUN WITH GROWJO OWNER — Growjo people as the PRIMARY owner source
+  await runTest('deep run — Growjo person is the PRIMARY owner (GROWJO_SOURCE, HIGH)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xavira-deep-growjo-'));
+    // Legitimate Growjo CSV (operator-supplied) with a technical owner.
+    const csv = 'company,domain,person_name,person_title,email,growjo_url\n' +
+      'Acme Corp,acme.com,Jane Doe,CTO,jane@acme.com,https://app.growjo.com/profile/acme-corp';
+    const { companies } = GrowjoProvider.parseCsv(csv);
+    const growjoData = companies[0] as GrowjoCompany;
+    assert(!!growjoData, 'growjo CSV parsed into a company record');
+    assert(growjoData.canonical_name === 'Acme Corp', 'growjo canonical_name');
+    assert(growjoData.domain === 'acme.com', 'growjo domain');
+    assert(growjoData.primary_title === 'CTO', 'growjo person title');
+    const growjoResolution: CompanyResolution = {
+      canonical_name: 'Acme Corp', official_domain: 'acme.com',
+      resolution_method: 'GROWJO_DOMAIN', resolution_source: growjoData.source_url,
+      resolution_confidence: 'HIGH',
+    };
+    const builder = new DeepProspectBuilder({
+      fetcher: fakeFetcher(goRoutes()),
+      observationProvider: new MockProvider(goEvidence),
+      saveArtifact: (p, d) => writeArtifact(p, d),
+      artifactsBaseDir: tmpDir,
+      maxDiscoveryPages: 20, discoveryDelayMs: 0, observationDelayMs: 0,
+      onProgress: () => {}, logger: () => {},
+      growjo: growjoData,            // <-- Growjo people feed the owner graph
+      resolution: growjoResolution,
+    });
+    const { prospect } = await builder.build('https://acme.com');
+
+    // Owner resolved FROM Growjo (primary), HIGH, provenance GROWJO_SOURCE.
+    assert(!!prospect.selected_owner, 'an owner was resolved');
+    assert(prospect.selected_owner!.confidence === 'HIGH', 'growjo owner is HIGH');
+    assert(prospect.selected_owner!.name === 'Jane Doe', `owner name is Jane Doe (got ${prospect.selected_owner!.name})`);
+    assert((prospect.selected_owner as any).deep_owner_provenance === 'GROWJO_SOURCE',
+      `owner provenance is GROWJO_SOURCE (got ${(prospect.selected_owner as any).deep_owner_provenance})`);
+    const ev0 = prospect.selected_owner!.owner_evidence[0] || '';
+    assert(ev0.includes('GROWJO_SOURCE'), 'owner evidence carries GROWJO_SOURCE tag');
+    assert(ev0.includes('is listed as'), 'owner evidence string preserves "is listed as" for the engine');
+
+    // Honest gates: defensible finding + HIGH growjo owner + contact -> OUTREACH_READY
+    assert(prospect.decision === 'OUTREACH_READY', `honest OUTREACH_READY via growjo owner (got ${prospect.decision})`);
+    assert(!!prospect.deep_finding, 'a defensible deep finding was assembled');
+    assert(prospect.email_draft.generated === true, 'email drafted through the gate');
+    const body = prospect.email_draft.body.toLowerCase();
+    const unsupported = ['vulnerable','definitely','guaranteed','most teams','critical exposure','breached','hacked'];
+    for (const term of unsupported) assert(!body.includes(term), `no fabricated term "${term}" in email`);
+    assert(prospect.contactability.length >= 1, 'professional contact captured (growjo/mailto)');
+
+    // Artifact persisted with the growjo-owner lineage
+    assert(fs.existsSync(prospect.artifact_path), 'deep artifact persisted');
+    const persisted = JSON.parse(fs.readFileSync(prospect.artifact_path, 'utf8')) as DeepProspect;
+    assert((persisted.selected_owner as any)?.deep_owner_provenance === 'GROWJO_SOURCE', 'persisted owner provenance is GROWJO_SOURCE');
   });
 
   // 16. DEEP CLI end-to-end via operator REPL (inputLines) + show all

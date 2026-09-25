@@ -97,6 +97,23 @@ export interface DeepContact {
 export type OwnerConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
 
 /**
+ * Which provenance layer produced an owner (kept separate per spec).
+ * - GROWJO_SOURCE            : licensed Growjo lead record (identity + role + company)
+ * - OFFICIAL_COMPANY_SOURCE  : person listed on the company's own people/team/about page
+ * - PUBLIC_PROFESSIONAL_SOURCE: person on any other public professional surface
+ * - REAL_PUBLIC_OBSERVATION  : observed via public crawl (no explicit listing)
+ * - DOCUMENTED_FACT          : asserted in a documented public fact (status/incident/etc.)
+ * - XAVIRA_INFERENCE         : residual fallback when no explicit person evidence exists
+ */
+export type OwnerProvenance =
+  | 'GROWJO_SOURCE'
+  | 'OFFICIAL_COMPANY_SOURCE'
+  | 'PUBLIC_PROFESSIONAL_SOURCE'
+  | 'REAL_PUBLIC_OBSERVATION'
+  | 'DOCUMENTED_FACT'
+  | 'XAVIRA_INFERENCE';
+
+/**
  * A person linked, via evidence, to a specific responsibility area of a finding.
  * The engine's TechnicalOwner is preserved in the provenance trail.
  */
@@ -112,6 +129,8 @@ export interface DeepOwner {
   confidence: OwnerConfidence;
   /** The subsystem/topic of the finding this owner is responsible for. */
   finding_link?: string;
+  /** Primary provenance layer that produced this owner (Growjo is primary). */
+  deep_owner_provenance?: OwnerProvenance;
 }
 
 // ── ICP qualification ────────────────────────────────────────────────────────

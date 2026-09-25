@@ -20,7 +20,6 @@ import { IntelligenceEngine } from './IntelligenceEngine';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
 import { PublicLinkDiscovery } from './PublicLinkDiscovery';
 import { PeopleExtractor } from './PeopleExtractor';
-import { OwnerSelector } from './OwnerSelector';
 import type {
   DeepBuilderOptions, DeepBuilderResult, DeepProspect, DeepSignal,
   DeepOwner, DeepContact, IcpQualification, DeepDecision, DeepConfidence,
@@ -32,7 +31,7 @@ import type {
 } from './IntelligenceCase';
 import { DeepSignalExtractor } from './DeepSignalExtractor';
 import { ContactabilityFinder } from './ContactabilityFinder';
-import { DeepOwnerResolver } from './DeepOwnerResolver';
+import { OwnerPipeline } from './OwnerPipeline';
 import { GitHubDiscovery } from './GitHubDiscovery';
 import { ActivityTimeline } from './ActivityTimeline';
 import { IcpQualificationEngine, type IcpContext } from './IcpQualificationEngine';
@@ -202,14 +201,27 @@ export class DeepProspectBuilder {
     this.onProgress?.('people', `${people.length} owner candidate(s) extracted.`);
     for (const c of people) this.onProgress?.('people', `  [people] ${c.name} — ${c.role}  (${c.confidence})  @ ${c.source_urls[0]}`);
 
-    // 5) OWNER RESOLUTION (graph: finding-area → responsibility → candidate → evidence)
-    const selectedOwner = DeepOwnerResolver.resolve(people, technicalArea, null, [], (stage, msg) => this.onProgress?.('owners', msg));
+    // 5) OWNER RESOLUTION — Growjo people PRIMARY (role match → company
+    // identity match → public corroboration → confidence). The HIGH-only gate
+    // is enforced by DeepOwnerResolver (unchanged); we never invent owners and
+    // never promote LOW/MEDIUM. Public candidates from PeopleExtractor provide
+    // optional corroboration (a Growjo-identified person need NOT appear on the
+    // company's own team/leadership page).
+    const op = OwnerPipeline.resolve({
+      company: surface.company,
+      targetDomain: this.resolution?.official_domain || parsed.hostname,
+      technicalArea,
+      classification: null, // deep finding detected later; responsibility uses surface technical area
+      resolvedEvidence: [],
+      growjoData: this.growjoData ?? null,
+      publicCandidates: people,
+      onProgress: (stage, message) => this.onProgress?.('owners', message),
+    });
+    const selectedOwner = op.selected;
+    const sel = { candidate: op.selectedCandidate, ownerEvidenceString: op.ownerEvidenceString, reason: op.reason };
     this.onProgress?.('owners', selectedOwner
-      ? `Selected owner: ${selectedOwner.name} (${selectedOwner.role}) — ${selectedOwner.confidence} (responsibility: ${selectedOwner.finding_link}).`
+      ? `Selected owner: ${selectedOwner.name} (${selectedOwner.role}) — ${selectedOwner.confidence} (responsibility: ${selectedOwner.finding_link}, provenance: ${op.provenance}).`
       : 'Owner graph: no evidence-backed owner discovered.');
-
-    // Select owner evidence string for the engine (must contain "is listed as" for HIGH)
-    const sel = people.length > 0 ? OwnerSelector.select(people, technicalArea) : { candidate: null, ownerEvidenceString: '', reason: 'No candidates.' };
 
     // 6) INTELLIGENCE PIPELINE (real public observation — PRODUCTION mode)
     const provider = this.injectedProvider ?? new LivePublicObservationProvider({
@@ -356,8 +368,8 @@ export class DeepProspectBuilder {
       public_observations,
       inferences,
       people,
-      owner_candidates: people,
-      selected_owner: selectedOwner,
+      owner_candidates: op.candidates,
+      selected_owner: selectedOwner ? { ...selectedOwner, deep_owner_provenance: op.provenance } : null,
       owner_evidence: selectedOwner?.owner_evidence || [],
       contactability: contacts,
       findings: caseRef.finding_classification || null,
