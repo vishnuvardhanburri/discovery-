@@ -24,7 +24,7 @@ import type {
   DeepBuilderOptions, DeepBuilderResult, DeepProspect, DeepSignal,
   DeepOwner, DeepContact, IcpQualification, DeepDecision, DeepConfidence,
   DeepStage, DeepEmailDraft, DeepFinding, EvidenceProvenance,
-  GrowjoCompany, CompanyResolution, GithubRepoMeta, ActivityEvent
+  ProviderCompanyLike, GrowjoCompany, CompanyResolution, GithubRepoMeta, ActivityEvent
 } from './DeepTypes';
 import type {
   IntelligenceCase, Evidence, OwnerCandidate, CompanySurface, FindingClassification, FindingType, SeverityLevel, StrengthLevel, DiscoveredPage
@@ -108,6 +108,7 @@ export class DeepProspectBuilder {
   private readonly injectedProvider: any;
   private readonly artifactsBaseDir?: string;
   private readonly growjoData?: GrowjoCompany | null;
+  private readonly providerCompanies?: ProviderCompanyLike[] | null;
   private readonly resolution?: CompanyResolution | null;
 
   constructor(options: DeepBuilderOptions = {}) {
@@ -122,6 +123,7 @@ export class DeepProspectBuilder {
     this.injectedProvider = options.observationProvider;
     this.artifactsBaseDir = options.artifactsBaseDir;
     this.growjoData = options.growjo;
+    this.providerCompanies = options.providerCompanies;
     this.resolution = options.resolution;
   }
 
@@ -214,6 +216,7 @@ export class DeepProspectBuilder {
       classification: null, // deep finding detected later; responsibility uses surface technical area
       resolvedEvidence: [],
       growjoData: this.growjoData ?? null,
+      providerCompanies: this.providerCompanies ?? null,
       publicCandidates: people,
       onProgress: (stage, message) => this.onProgress?.('owners', message),
     });
@@ -382,6 +385,7 @@ export class DeepProspectBuilder {
       decision,
       confidence,
       growjo_data: this.growjoData ?? null,
+      provider_data: this.providerCompanies ?? null,
       resolution: this.resolution ?? null,
       github_activity: githubRepos,
       activity_timeline: timeline,
@@ -411,7 +415,7 @@ export class DeepProspectBuilder {
       owner_candidates: [], selected_owner: null, owner_evidence: [], contactability: [],
       findings: null, deep_finding: null, evidence: [], primary_angle: 'No surface discovered.', secondary_angle: null,
       recommended_subjects: [], email_draft: email as any, decision: 'NO_GO', confidence: 'LOW',
-      growjo_data: this.growjoData ?? null, resolution: this.resolution ?? null,
+      growjo_data: this.growjoData ?? null, provider_data: this.providerCompanies ?? null, resolution: this.resolution ?? null,
       github_activity: [], activity_timeline: [],
       artifact_path: '', audit_trail: audit, case_ref: undefined
     };

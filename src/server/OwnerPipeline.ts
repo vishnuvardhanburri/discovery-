@@ -59,6 +59,8 @@ export interface OwnerPipelineInput {
   classification: FindingClassification | null;
   resolvedEvidence: Evidence[];
   growjoData: GrowjoCompany | null;
+  /** Additional provider companies (from CSV, PublicDataset, etc.) — optional. */
+  providerCompanies?: ProviderCompanyLike[] | null;
   /** Public people-page candidates (already extracted by PeopleExtractor). */
   publicCandidates: OwnerCandidate[];
   onProgress?: (stage: DeepStage, message: string) => void;
@@ -106,56 +108,61 @@ function companyIdentityMatch(growjoCompany: string | null | undefined, targetCo
 }
 
 /**
- * Build Growjo-derived owner candidates. A candidate is produced ONLY when
- * identity + role-match + company-identity all hold (explicit, licensed evidence).
+ * Build provider-derived owner candidates (Growjo, CSV, PublicDataset, etc.).
+ * A candidate is produced ONLY when identity + role-match + company-identity
+ * all hold (explicit, licensed evidence). Providers that carry no person
+ * data naturally produce zero candidates — no owners are invented.
  */
-function buildFromGrowjo(
-  growjo: GrowjoContactLike,
+function buildFromProviderData(
+  data: ProviderCompanyLike,
   technicalArea: string,
   targetDomain: string | null,
   targetCompany: string,
+  evidenceTag: string,
   onProgress?: (stage: DeepStage, message: string) => void
 ): OwnerCandidate[] {
   const candidates: OwnerCandidate[] = [];
-  const p = growjo.person;
+  const p = { name: data.primary_person_name, title: data.primary_title };
+  const label = data.source || 'provider';
   if (!p.name) {
-    onProgress?.('people', '  [growjo] no person name in Growjo record (not an owner candidate).');
+    onProgress?.('people', `  [${label}] no person name in record (not an owner candidate).`);
     return candidates;
   }
   // Role match
   if (!isTechnicalRole(p.title)) {
-    onProgress?.('people', `  [growjo] ${p.name} — skipped (role "${p.title || ''}" is not a technical owner role; not a candidate).`);
+    onProgress?.('people', `  [${label}] ${p.name} — skipped (role "${p.title || ''}" is not a technical owner role; not a candidate).`);
     return candidates;
   }
   // Company identity match (domain, then name fallback)
-  const domainOk = domainMatch(growjo.domain, targetDomain) || domainMatch(growjo.domain, targetDomain);
-  const companyOk = domainOk || companyIdentityMatch(growjo.company, targetCompany);
+  const domainOk = domainMatch(data.domain, targetDomain) || domainMatch(data.domain, targetDomain);
+  const companyOk = domainOk || companyIdentityMatch(data.company, targetCompany);
   if (!companyOk) {
-    onProgress?.('people', `  [growjo] ${p.name} — skipped (company identity mismatch; not a candidate, not invented).`);
+    onProgress?.('people', `  [${label}] ${p.name} — skipped (company identity mismatch; not a candidate, not invented).`);
     return candidates;
   }
 
-  const src = growjo.growjo_url || growjo.source_url || '';
-  const evidence = `${EVID_TAGS.GROWJO}: ${p.name} is listed as ${p.title} on ${src || '(growjo record)'}`;
+  const src = data.growjo_url || data.source_url || '';
+  const evidence = `${evidenceTag}: ${p.name} is listed as ${p.title} on ${src || `(${label} record)`}`;
   candidates.push({
     name: p.name,
     role: p.title || 'Technical role',
-    company: growjo.company || targetCompany,
+    company: data.company || targetCompany,
     source_urls: src ? [src] : [],
     evidence: [evidence],
     relationship_to_area: `Role '${p.title}' covers ${technicalArea}.`,
     confidence: 'HIGH',
     explicit_evidence: true,
   });
-  onProgress?.('people', `  [growjo] ${p.name} — ${p.title} (HIGH, ${EVID_TAGS.GROWJO})`);
+  onProgress?.('people', `  [${label}] ${p.name} — ${p.title} (HIGH, ${evidenceTag})`);
   return candidates;
 }
 
-/** Lightweight view of the bits of GrowjoContact we need (decouples from A's exports). */
-interface GrowjoContactLike {
+interface ProviderCompanyLike {
+  source: string;
   company: string;
   domain: string | null;
-  person: { name: string | null; title: string | null };
+  primary_person_name: string | null;
+  primary_title: string | null;
   growjo_url: string | null;
   source_url: string | null;
 }
@@ -170,8 +177,19 @@ function mergeCandidates(
   const byName = new Map<string, number>(); // name -> index in merged
 
   for (const c of growjoCandidates) {
-    byName.set(canonicalName(c.name), merged.length);
-    merged.push(c);
+    const key = canonicalName(c.name);
+    const idx = byName.get(key);
+    if (idx !== undefined) {
+      // Same person already present (from another provider) — merge evidence.
+      const existing = merged[idx];
+      existing.evidence = Array.from(new Set([...existing.evidence, ...c.evidence]));
+      existing.source_urls = Array.from(new Set([...existing.source_urls, ...c.source_urls]));
+      existing.explicit_evidence = existing.explicit_evidence || c.explicit_evidence;
+      onProgress?.('people', `  [dedupe] ${existing.name} — merged candidate from multiple provider sources.`);
+    } else {
+      byName.set(key, merged.length);
+      merged.push(c);
+    }
   }
 
   for (const pub of publicCandidates) {
@@ -200,7 +218,7 @@ export class OwnerPipeline {
   static resolve(input: OwnerPipelineInput): OwnerPipelineResult {
     const {
       company, targetDomain, technicalArea, classification, resolvedEvidence,
-      growjoData, publicCandidates, onProgress,
+      growjoData, providerCompanies, publicCandidates, onProgress,
     } = input;
 
     // 1) responsibility profile from the finding
@@ -208,26 +226,38 @@ export class OwnerPipeline {
     const area = technicalArea || subsystem || 'platform engineering';
     onProgress?.('owners', `Responsibility profile: ${area} (subsystem: ${subsystem || 'n/a'}).`);
 
-    // 2-3) Growjo people PRIMARY (role match + company identity match)
-    let growjoContact: GrowjoContactLike | null = null;
+    // 2-3) Provider people PRIMARY (role match + company identity match).
+    //      Growjo remains the PRIMARY source; other provider companies
+    //      (CSV, PublicDataset, etc.) are checked in waterfall order.
+    let providerCandidates: OwnerCandidate[] = [];
+
     if (growjoData) {
       const extracted = GrowjoProvider.extractContacts(growjoData);
-      growjoContact = {
+      const contact: ProviderCompanyLike = {
+        source: 'GROWJO',
         company: extracted.company,
         domain: extracted.domain,
-        person: { name: extracted.person.name, title: extracted.person.title },
+        primary_person_name: extracted.person.name,
+        primary_title: extracted.person.title,
         growjo_url: growjoData.growjo_url,
         source_url: growjoData.source_url,
       };
+      providerCandidates.push(...buildFromProviderData(contact, area, targetDomain, company, EVID_TAGS.GROWJO, onProgress));
     }
-    const growjoCandidates = growjoContact ? buildFromGrowjo(growjoContact, area, targetDomain, company, onProgress) : [];
+
+    if (providerCompanies) {
+      for (const pc of providerCompanies) {
+        if (pc.source === 'GROWJO') continue; // already processed above
+        providerCandidates.push(...buildFromProviderData(pc, area, targetDomain, company, EVID_TAGS.OFFICIAL_COMPANY, onProgress));
+      }
+    }
 
     // 4) public corroboration (optional — does not weaken the gate)
     const publicSelected = publicCandidates.length > 0;
     onProgress?.('owners', `Public candidates from company people pages: ${publicCandidates.length}.`);
 
-    // 5) merge Growjo (primary) + public (corroboration); dedupe by canonical name
-    const merged = mergeCandidates(growjoCandidates, publicCandidates, onProgress);
+    // 5) merge provider (primary) + public (corroboration); dedupe by canonical name
+    const merged = mergeCandidates(providerCandidates, publicCandidates, onProgress);
 
     // 6) select best + HIGH-only resolve (gate NOT weakened)
     const sel = merged.length > 0

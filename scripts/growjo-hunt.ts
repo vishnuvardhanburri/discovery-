@@ -1,16 +1,31 @@
 // growjo-hunt.ts
 // ─────────────────
-// REAL public-surface deep research on companies from a Growjo CSV export.
-// The Growjo data is passed into the DeepProspectBuilder as the PRIMARY
-// owner-candidate source (Growjo people → role match → company identity match
-// → public corroboration → confidence). Read-only, same-origin, bounded.
-// Honest decisions only (NO_GO / RESEARCH_MORE / OUTREACH_READY). No invented owners.
+// UNIFIED XAVIRA DEEP-RESEARCH HUNT ENTRY POINT
 //
-// Usage: npx tsx scripts/growjo-hunt.ts data/growjo_export.csv --batch <n> [--start <k>]
+// Supports all input modes:
+//   npx tsx scripts/growjo-hunt.ts data/growjo_export.csv --batch 3
+//   npx tsx scripts/growjo-hunt.ts data/ft1000_2026.csv --batch 5 --start 200
+//   npx tsx scripts/growjo-hunt.ts --domains "vercel.com,supabase.com,stripe.com"
+//   npx tsx scripts/growjo-hunt.ts --companies "Vercel,Supabase,Stripe"
+//   npx tsx scripts/growjo-hunt.ts --research https://vercel.com
+//
+// All data sources are OPTIONAL / pluggable. When no CSV is provided,
+// company names/domains are used as direct seeds — the pipeline resolves
+// them independently of any provider.
+//
+// Honest decisions only (NO_GO / RESEARCH_MORE / OUTREACH_READY). No invented owners.
+
 import * as fs from 'fs';
 import * as path from 'path';
+import { CSVProvider } from '../src/server/providers/CSVProvider';
+import { PublicDatasetProvider } from '../src/server/providers/PublicDatasetProvider';
+import { ProviderRegistry } from '../src/server/providers/ProviderRegistry';
+import { GrowjoProviderAdapter } from '../src/server/providers/GrowjoProviderAdapter';
+import { EntityResolver } from '../src/server/providers/EntityResolver';
 import { GrowjoProvider } from '../src/server/GrowjoProvider';
-import type { GrowjoCompany, CompanyResolution } from '../src/server/DeepTypes';
+import type { CanonicalCompany, CanonicalPerson } from '../src/server/providers/Model';
+import type { CompanyResolution, DeepBuilderResult } from '../src/server/DeepTypes';
+import type { ProviderCompanyLike } from '../src/server/DeepTypes';
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -32,43 +47,90 @@ const boundedFetch: typeof fetch = (async (url: string, init: any) => {
   finally { clearTimeout(t); }
 }) as any;
 
-function parseArgs(argv: string[]): { csv: string; batch: number; start: number } {
-  const csv = argv[2] || 'data/growjo_export.csv';
-  const batchMatch = argv.join(' ').match(/--batch\s+(\d+)/);
-  const startMatch = argv.join(' ').match(/--start\s+(\d+)/);
-  return { csv, batch: batchMatch ? parseInt(batchMatch[1], 10) : 3, start: startMatch ? parseInt(startMatch[1], 10) : 0 };
+// ── Convert GrowjoCompany to CanonicalCompany (adds missing canonical fields) ──
+
+function toCanonical(c: any): CanonicalCompany {
+  return { ...c, people: c.people || [], contacts: c.contacts || [], entity_sources: c.entity_sources || [] };
 }
 
+// ── Arg parsing ──
+
+interface HuntArgs {
+  csv: string | null;
+  batch: number;
+  start: number;
+  domains: string[];
+  companies: string[];
+  research: string | null;
+}
+
+function parseArgs(argv: string[]): HuntArgs {
+  const raw = argv.slice(2);
+  // First pass: identify and consume flag values so they don't leak as positional args
+  const flagsWithValue = new Set(['--csv', '--batch', '--start', '--domains', '--companies', '--research']);
+  const positionals: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (flagsWithValue.has(raw[i])) { i++; continue; } // skip flag + its value
+    if (raw[i].startsWith('--')) { continue; }          // skip unknown flag
+    positionals.push(raw[i]);                          // genuine positional
+  }
+  const csv = positionals[0] || null;
+  const batchMatch = argv.join(' ').match(/--batch\s+(\d+)/);
+  const startMatch = argv.join(' ').match(/--start\s+(\d+)/);
+  const domainsMatch = argv.join(' ').match(/--domains\s+([\w.,\-:]+)/);
+  const companiesMatch = argv.join(' ').match(/--companies\s+(["']?)([^"']+)\1/);
+  const researchMatch = argv.join(' ').match(/--research\s+(https?:\/\/[\w.\-]+)/);
+  return {
+    csv,
+    batch: batchMatch ? parseInt(batchMatch[1], 10) : 5,
+    start: startMatch ? parseInt(startMatch[1], 10) : 0,
+    domains: domainsMatch ? domainsMatch[1].split(',').map(d => d.trim()).filter(Boolean) : [],
+    companies: companiesMatch ? companiesMatch[2].split(',').map(c => c.trim()).filter(Boolean) : [],
+    research: researchMatch ? researchMatch[1] : null,
+  };
+}
+
+// ── Resolution ──
+
+function buildResolution(company: CanonicalCompany | null, domain: string, source: string): CompanyResolution {
+  return {
+    canonical_name: company?.canonical_name || domain,
+    official_domain: domain,
+    resolution_method: company && company.domain ? 'GROWJO_DOMAIN' : 'AMBIGUOUS',
+    resolution_source: source,
+    resolution_confidence: 'HIGH',
+  };
+}
+
+// ── Single-company hunt ──
+
 interface HuntResult {
-  company: string; domain: string; industry: string; ranking: string;
+  company: string; domain: string; sector: string;
   decision: string; confidence: string | null;
   finding: string; findingProvenance: string;
   owner: string | null; ownerConfidence: string | null; ownerProvenance: string | null;
-  people: number; ownerCandidates: number;
-  growjoHasPerson: boolean;
+  people: number; owner_candidates: number;
+  growjo_person: boolean;
+  provider_sources: string[];
   error: string | null;
 }
 
-async function runOne(company: GrowjoCompany, idx: number, total: number): Promise<HuntResult> {
-  const target = company.domain ? `https://${company.domain}` : (company.website || '');
-  const growjoName = company.canonical_name;
-  const ranking = company.raw.ranking || company.raw.temp_ranking || '';
+async function runOne(
+  company: CanonicalCompany | null,
+  domain: string,
+  targetUrl: string,
+  providerCompanies: ProviderCompanyLike[],
+): Promise<HuntResult> {
+  const growjoName = company?.canonical_name || domain;
+  const sector = company?.industry || 'unknown';
 
-  console.log(`\n[${idx}/${total}] ${growjoName} (${target}) — growjo rank #${ranking || '?'}, industry: ${company.industry || 'n/a'}`);
+  console.log(`\n${growjoName} (${targetUrl})`);
+  if (company) {
+    const hasPerson = !!(company.primary_person_name && company.primary_person_name !== company.company);
+    console.log(`  [${company.source}] person=${company.primary_person_name || '(none)'}  title=${company.primary_title || '(none)'}  email=${company.primary_email || '(none)'}  hasPersonData=${hasPerson || !!company.primary_title || !!company.primary_email}`);
+  }
 
-  const resolution: CompanyResolution = {
-    canonical_name: company.canonical_name,
-    official_domain: company.domain,
-    resolution_method: company.domain ? 'GROWJO_DOMAIN' : 'AMBIGUOUS',
-    resolution_source: company.source_url || company.growjo_url || 'GROWJO record',
-    resolution_confidence: company.domain ? 'HIGH' : 'LOW',
-  };
-
-  // Check: does this Growjo record carry any person-level data?
-  const hasPerson = !!(company.primary_person_name && company.primary_person_name !== company.company);
-  const hasTitle = !!company.primary_title;
-  const hasEmail = !!company.primary_email;
-  console.log(`  [growjo] person_name=${company.primary_person_name || '(none)'}  title=${company.primary_title || '(none)'}  email=${company.primary_email || '(none)'}  hasPersonData=${hasPerson || hasTitle || hasEmail}`);
+  const resolution = buildResolution(company, domain, company?.source_url || `Direct seed: ${domain}`);
 
   const builder = new DeepProspectBuilder({
     fetcher: boundedFetch as any,
@@ -80,20 +142,23 @@ async function runOne(company: GrowjoCompany, idx: number, total: number): Promi
     observationDelayMs: 40,
     onProgress: (stage, msg) => console.log(`  [${stage}] ${msg}`),
     logger: (m) => console.log(`  [discovery] ${m}`),
-    growjo: company,
+    growjo: company && company.source === 'GROWJO' ? company as any : null,
+    providerCompanies,
     resolution,
   });
 
   const result: HuntResult = {
-    company: growjoName, domain: company.domain || '', industry: company.industry || '', ranking: ranking,
-    decision: '', confidence: null, finding: '', findingProvenance: '',
+    company: growjoName, domain, sector,
+    decision: '', confidence: null,
+    finding: '', findingProvenance: '',
     owner: null, ownerConfidence: null, ownerProvenance: null,
-    people: 0, ownerCandidates: 0, growjoHasPerson: hasPerson || hasTitle || hasEmail,
+    people: 0, owner_candidates: 0, growjo_person: false,
+    provider_sources: company ? [company.source] : [],
     error: null,
   };
 
   try {
-    const { prospect } = await withTimeout(builder.build(target), 90000);
+    const { prospect } = await withTimeout(builder.build(targetUrl), 90000);
     result.decision = prospect.decision;
     result.confidence = prospect.confidence;
     result.finding = prospect.deep_finding ? `${prospect.deep_finding.finding_type} / ${prospect.deep_finding.confidence}` : (prospect.findings ? prospect.findings.finding_type : 'NONE');
@@ -102,12 +167,12 @@ async function runOne(company: GrowjoCompany, idx: number, total: number): Promi
     result.ownerConfidence = prospect.selected_owner ? prospect.selected_owner.confidence : null;
     result.ownerProvenance = prospect.selected_owner ? (prospect.selected_owner as any).deep_owner_provenance || '(none)' : null;
     result.people = prospect.people.length;
-    result.ownerCandidates = prospect.owner_candidates.length;
+    result.owner_candidates = prospect.owner_candidates.length;
+    result.growjo_person = !!company?.primary_person_name && company.primary_person_name !== company.company;
     console.log(`  ── RESULT: ${result.decision} (confidence ${result.confidence})`);
     console.log(`     finding:   ${result.finding}  [${result.findingProvenance}]`);
     console.log(`     owner:     ${result.owner} (${result.ownerConfidence}, provenance: ${result.ownerProvenance || 'none'})`);
-    console.log(`     people:    ${result.people}  owner_candidates: ${result.ownerCandidates}`);
-    console.log(`     growjo person data: ${result.growjoHasPerson ? 'YES' : 'NO (Contact Data → lead411 redirect)'}`);
+    console.log(`     people:    ${result.people}  owner_candidates: ${result.owner_candidates}`);
   } catch (e: any) {
     result.error = e?.message || String(e);
     console.log(`  ── RESULT: ERROR: ${result.error}`);
@@ -116,48 +181,149 @@ async function runOne(company: GrowjoCompany, idx: number, total: number): Promi
   return result;
 }
 
-async function main(): Promise<void> {
-  const { csv, batch, start } = parseArgs(process.argv);
-  if (!fs.existsSync(csv)) { console.error(`CSV not found: ${csv}`); process.exit(1); }
-  const text = fs.readFileSync(csv, 'utf8');
-  const { companies } = GrowjoProvider.parseCsv(text);
-  console.log(`XAVIRA GROWJO HUNT — ${companies.length} companies in CSV, hunting batch of ${batch} (from index ${start})`);
-  console.log(`Source: ${csv}`);
+// ── CSV loading — auto-detects format ──
 
-  const slice = companies.slice(start, start + batch);
-  const results: HuntResult[] = [];
-  let i = start;
-  for (const c of slice) {
-    i++;
-    try { results.push(await runOne(c, i, companies.length)); }
-    catch (e: any) {
-      console.log(`\n[${i}/${companies.length}] ${c.canonical_name} — FAILED: ${e?.message || String(e)}`);
-      results.push({
-        company: c.canonical_name, domain: c.domain || '', industry: c.industry || '', ranking: c.raw.ranking || '',
-        decision: 'ERROR', confidence: null, finding: '', findingProvenance: '',
-        owner: null, ownerConfidence: null, ownerProvenance: null,
-        people: 0, ownerCandidates: 0, growjoHasPerson: false,
-        error: e?.message || String(e),
-      });
-    }
+function loadCsv(csvPath: string): { companies: CanonicalCompany[]; format: string; provider: string } {
+  const text = fs.readFileSync(csvPath, 'utf8');
+
+  // Try Growjo format (comma-delimited, matches GrowjoProvider aliases)
+  const growjoResult = GrowjoProvider.parseCsv(text);
+  if (growjoResult.companies.length > 0) {
+    // Check if companies have real person data or are just company names
+    const providerSource = growjoResult.column_mapping['name'] || growjoResult.column_mapping['company_name']
+      ? 'GROWJO' : 'CSV';
+    return { companies: growjoResult.companies.map(toCanonical), format: 'growjo-comma', provider: providerSource };
   }
 
-  // Summary table
-  console.log('\n═══════════════════════════════════════════════════════════════');
-  console.log('                    GROWJO HUNT SUMMARY');
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log(`${'Company'.padEnd(24)} | ${'Domain'.padEnd(18)} | ${'Decision'.padEnd(14)} | ${'Owner'.padEnd(18)} | ${'Prov'.padEnd(18)} | GrowjoPerson`);
-  console.log('─'.repeat(130));
+  // Try generic CSV (comma-delimited)
+  const csvProvider = new CSVProvider({ sourceUrl: csvPath });
+  const csvResult = csvProvider.parseCsv(text);
+  if (csvResult.companies.length > 0) {
+    return { companies: csvResult.companies, format: 'generic-comma', provider: 'CSV' };
+  }
+
+  // Try semicolon-delimited (CityData / PublicDataset format)
+  const publicProvider = new PublicDatasetProvider({
+    datasetName: path.basename(csvPath),
+    sourceUrl: csvPath,
+  });
+  const pubResult = publicProvider.parseCsv(text, ';');
+  if (pubResult.companies.length > 0) {
+    return { companies: pubResult.companies, format: 'citydata-semicolon', provider: 'PUBLIC_DATASET' };
+  }
+
+  throw new Error(`Could not parse CSV: ${csvPath}`);
+}
+
+// ── Main ──
+
+async function main(): Promise<void> {
+  const { csv, batch, start, domains, companies: companyNames, research } = parseArgs(process.argv);
+
+  // Initialize provider registry (providers are optional/pluggable)
+  const registry = new ProviderRegistry();
+  const entityResolver = new EntityResolver();
+
+  // ── Mode 1: --research <URL> ──
+  if (research) {
+    console.log(`XAVIRA HUNT — direct research: ${research}`);
+    console.log(`Providers: (none — direct seed, no Growjo required)`);
+    const result = await runOne(null, new URL(research).hostname, research, []);
+    printSummary([result]);
+    return;
+  }
+
+  // ── Mode 2: --domains ──
+  if (domains.length > 0) {
+    console.log(`XAVIRA HUNT — ${domains.length} domain seed(s): ${domains.join(', ')}`);
+    console.log(`Providers: (none — direct domain seeds, no Growjo required)`);
+    const results: HuntResult[] = [];
+    let i = 0;
+    for (const d of domains) {
+      i++;
+      try {
+        const providerCompanies: CanonicalCompany[] = csv ? loadCsv(csv).companies : [];
+        const company = providerCompanies.find(c => (c.domain || '').toLowerCase() === d.toLowerCase()) || null;
+        const target = d.startsWith('http') ? d : `https://${d}`;
+        results.push(await runOne(company, d, target, company ? [company] : []));
+      } catch (e: any) {
+        console.log(`\n[${i}/${domains.length}] ${d} — FAILED: ${e?.message || String(e)}`);
+        results.push({ company: d, domain: d, sector: 'unknown', decision: 'ERROR', confidence: null, finding: '', findingProvenance: '', owner: null, ownerConfidence: null, ownerProvenance: null, people: 0, owner_candidates: 0, growjo_person: false, provider_sources: [], error: e?.message || String(e) });
+      }
+    }
+    printSummary(results);
+    return;
+  }
+
+  // ── Mode 3: --companies ──
+  if (companyNames.length > 0) {
+    console.log(`XAVIRA HUNT — ${companyNames.length} company name seed(s): ${companyNames.join(', ')}`);
+    console.log(`Providers: (none — direct name seeds, no Growjo required)`);
+    const results: HuntResult[] = [];
+    let i = 0;
+    for (const name of companyNames) {
+      i++;
+      try {
+        const providerCompanies: CanonicalCompany[] = csv ? loadCsv(csv).companies : [];
+        const company = providerCompanies.find(c => c.company.toLowerCase().includes(name.toLowerCase())) || null;
+        const domain = company?.domain || name.toLowerCase().replace(/\s+/g, '') + '.com';
+        const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+        results.push(await runOne(company, domain, target, company ? [company] : []));
+      } catch (e: any) {
+        console.log(`\n[${i}/${companyNames.length}] ${name} — FAILED: ${e?.message || String(e)}`);
+        results.push({ company: name, domain: '', sector: 'unknown', decision: 'ERROR', confidence: null, finding: '', findingProvenance: '', owner: null, ownerConfidence: null, ownerProvenance: null, people: 0, owner_candidates: 0, growjo_person: false, provider_sources: [], error: e?.message || String(e) });
+      }
+    }
+    printSummary(results);
+    return;
+  }
+
+  // ── Mode 4: CSV file (batch) ──
+  if (csv) {
+    const { companies, format, provider } = loadCsv(csv);
+    console.log(`XAVIRA HUNT — ${companies.length} companies from ${csv}`);
+    console.log(`Format: ${format} | Provider source: ${provider}`);
+
+    const slice = companies.slice(start, start + batch);
+    const results: HuntResult[] = [];
+    let i = start;
+    for (const c of slice) {
+      i++;
+      try {
+        const targetUrl = c.domain ? (c.domain.startsWith('http') ? c.domain : `https://${c.domain}`) : `https://${c.canonical_name.replace(/\s+/g, '').toLowerCase()}.com`;
+        const providerCompanies = [c] as ProviderCompanyLike[];
+        results.push(await runOne(c, c.domain || '', targetUrl, providerCompanies));
+      } catch (e: any) {
+        console.log(`\n[${i}/${companies.length}] ${c.canonical_name} — FAILED: ${e?.message || String(e)}`);
+        results.push({ company: c.canonical_name, domain: c.domain || '', sector: c.industry || 'unknown', decision: 'ERROR', confidence: null, finding: '', findingProvenance: '', owner: null, ownerConfidence: null, ownerProvenance: null, people: 0, owner_candidates: 0, growjo_person: false, provider_sources: [c.source], error: e?.message || String(e) });
+      }
+    }
+    printSummary(results);
+    return;
+  }
+
+  console.error('Usage: npx tsx scripts/growjo-hunt.ts <csv> [options]');
+  console.error('       npx tsx scripts/growjo-hunt.ts --domains "vercel.com,supabase.com"');
+  console.error('       npx tsx scripts/growjo-hunt.ts --companies "Vercel,Supabase"');
+  console.error('       npx tsx scripts/growjo-hunt.ts --research https://vercel.com');
+  console.error('Options: --batch N  --start K');
+  process.exit(1);
+}
+
+function printSummary(results: HuntResult[]): void {
+  console.log('\n══════════════════════════════════════════════════════════════════');
+  console.log('                    HUNT SUMMARY');
+  console.log('══════════════════════════════════════════════════════════════════');
   for (const r of results) {
     console.log(
-      `${r.company.slice(0, 22).padEnd(24)} | ${(r.domain || '—').slice(0, 16).padEnd(18)} | ${r.decision.padEnd(14)} | ${(r.owner || '—').slice(0, 16).padEnd(18)} | ${(r.ownerProvenance || '—').slice(0, 16).padEnd(18)} | ${r.growjoHasPerson ? 'YES' : 'NO'}`
+      `${r.company.slice(0, 22).padEnd(24)} | ${(r.domain || '—').slice(0, 16).padEnd(18)} | ${r.decision.padEnd(14)} | ${(r.owner || '—').slice(0, 16).padEnd(18)} | ${(r.ownerProvenance || '—').slice(0, 16).padEnd(18)} | prov=${r.provider_sources.join(',')}`
     );
   }
-  console.log('═'.repeat(130));
+  console.log('═'.repeat(120));
   const byDecision = results.reduce((acc, r) => { acc[r.decision] = (acc[r.decision] || 0) + 1; return acc; }, {} as Record<string, number>);
   console.log(`Decision breakdown: ${Object.entries(byDecision).map(([d, n]) => `${d}×${n}`).join('  ')}`);
   const ownersFound = results.filter(r => r.owner !== '(none)' && r.owner !== null);
-  console.log(`Owners found: ${ownersFound.length} / ${results.length}  (honest: ${results.length - ownersFound.length} companies produced no owner — no persons in Growjo CSV)`);
+  console.log(`Owners found: ${ownersFound.length} / ${results.length}  (no persons in CSV → no owners invented)`);
   console.log('\n═══ DONE ═══');
 }
 

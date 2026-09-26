@@ -24,6 +24,14 @@
     "src/server/DeepProspectBuilder.ts",
     "src/server/XaviraOperator.ts",
     "src/server/GrowjoProvider.ts",
+    "src/server/providers/Model.ts",
+    "src/server/providers/ProviderInterface.ts",
+    "src/server/providers/CSVProvider.ts",
+    "src/server/providers/PublicDatasetProvider.ts",
+    "src/server/providers/ProviderRegistry.ts",
+    "src/server/providers/SourceRegistry.ts",
+    "src/server/providers/GrowjoProviderAdapter.ts",
+    "src/server/providers/EntityResolver.ts",
     "src/server/CompanyQueue.ts",
     "src/server/DomainResolver.ts",
     "src/server/GitHubDiscovery.ts",
@@ -43,6 +51,7 @@
     "tests/orchestration.test.ts",
     "tests/sourceGraph.test.ts",
     "tests/email.test.ts",
-    "tests/ownerPipeline.test.ts"
+    "tests/ownerPipeline.test.ts",
+    "tests/providerArchitecture.test.ts"
   ]
 }

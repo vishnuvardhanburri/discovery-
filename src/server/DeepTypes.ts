@@ -229,6 +229,8 @@ export interface DeepProspect {
   case_ref?: IntelligenceCase;
   /** Growjo lead data that seeded this company (provenance-preserved). */
   growjo_data?: GrowjoCompany | null;
+  /** Additional provider companies that seeded this company (non-Growjo). */
+  provider_data?: ProviderCompanyLike[] | null;
   /** Domain resolution provenance (canonical name, official domain, method, confidence). */
   resolution?: CompanyResolution | null;
   /** GitHub activity discovered on the company's own public pages. */
@@ -263,6 +265,8 @@ export interface DeepBuilderOptions {
   artifactsBaseDir?: string;
   /** Growjo lead data that seeded this company (provenance-preserved). */
   growjo?: GrowjoCompany | null;
+  /** Additional provider companies (CSV, PublicDataset, etc.) — optional, non-Growjo sources. */
+  providerCompanies?: ProviderCompanyLike[] | null;
   /** Pre-resolved canonical domain (from DomainResolver); null if not yet resolved. */
   resolution?: CompanyResolution | null;
 }
@@ -275,6 +279,29 @@ export interface PublicObservationProviderLike {
 // ── Growjo input model ──────────────────────────────────────────────────────
 
 export type GrowjoSource = 'GROWJO';
+
+/**
+ * Minimal structural view of a provider company that the OwnerPipeline
+ * can accept from ANY provider (Growjo, CSV, PublicDataset, etc.).
+ * Every field is checked against the company under research; if no person
+ * or domain is available, the role-match gate naturally rejects the candidate
+ * — no owners are invented.
+ */
+export interface ProviderCompanyLike {
+  source: string;
+  company: string;
+  canonical_name: string;
+  domain: string | null;
+  website: string | null;
+  primary_person_name: string | null;
+  primary_title: string | null;
+  primary_email: string | null;
+  primary_phone: string | null;
+  linkedin_url: string | null;
+  growjo_url: string | null;
+  source_url: string | null;
+  retrieved_at: string;
+}
 
 /**
  * Canonical lead record imported from a Growjo CSV export / licensed API.

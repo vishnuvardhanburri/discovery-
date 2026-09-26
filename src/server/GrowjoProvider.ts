@@ -94,7 +94,8 @@ export class GrowjoProvider {
   /** Parse raw CSV text into provenance-preserved companies. */
   static parseCsv(csvText: string, opts?: { retrievedAt?: string; source_url?: string }): GrowjoImportResult {
     const warnings: string[] = [];
-    const rows = parseCsvRows(csvText);
+    // Strip UTF-8 BOM so the first header cell isn't prefixed (e.g. FT1000 exports).
+    const rows = parseCsvRows(csvText.replace(/^\uFEFF/, ''));
     if (rows.length === 0) {
       return { companies: [], column_mapping: {}, total_rows: 0, duplicate_domains_dropped: 0, warnings: ['CSV had no data rows.'] };
     }
