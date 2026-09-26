@@ -1,12 +1,20 @@
 /**
  * XAVIRA — PROVIDER REGISTRY
  * ─────────────────────────────────────────────────────────────────────────────
- * Manages all configured providers and implements the provider waterfall:
+ * Manages all configured providers and implements the provider waterfall.
  *
- *   Growjo → configured licensed provider → public legitimate source → unknown
+ * Provider order is CONFIGURABLE, not hardcoded (spec §1). No provider is
+ * inherently primary — Growjo, CSV, public datasets, licensed providers and
+ * future providers all participate as equals. The operator configures the
+ * order.
  *
- * Each provider is OPTIONAL. If Growjo is unavailable, the system continues
- * with whatever providers are configured. Contacts are never guessed.
+ * Field-level precedence (spec §2) is handled via FieldPrecedenceConfig:
+ *   COMPANY_IDENTITY: official company → licensed → public dataset
+ *   CONTACT:           licensed → imported → public professional
+ *   TECHNICAL_EVIDENCE: direct observation → official source → public GitHub
+ *   PERSON_IDENTITY:   explicit evidence → licensed → imported dataset
+ *
+ * Each provider is OPTIONAL. Provider failure does not kill the pipeline.
  */
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, Provenance, SourceEntry } from './Model';
 import { CompanyDataProvider, type ProviderLookupResult } from './ProviderInterface';
@@ -19,6 +27,37 @@ export interface ProviderConfig {
   /** Priority in the waterfall (lower = earlier). */
   priority: number;
 }
+
+/**
+ * Per-field provider precedence (spec §2). Each field type lists the provider
+ * keys in the order they should be consulted. This replaces the hardcoded
+ * "Growjo primary" semantic with field-level precedence.
+ *
+ * Example:
+ *   {
+ *     company_identity: ['growjo', 'csv', 'public-dataset', 'manual'],
+ *     contact:          ['growjo', 'hunter', 'public', 'unknown'],
+ *     person_identity:  ['growjo', 'csv', 'public'],
+ *   }
+ */
+export interface FieldPrecedenceConfig {
+  /** Provider order for company identity (name, domain, website). */
+  company_identity: string[];
+  /** Provider order for contact info (email, phone, LinkedIn). */
+  contact: string[];
+  /** Provider order for person identity (name, title, role). */
+  person_identity: string[];
+  /** Provider order for technical evidence (signals, observations). */
+  technical_evidence: string[];
+}
+
+/** Default field-level precedence — all providers are EQUAL priority. */
+export const DEFAULT_FIELD_PRECEDENCE: FieldPrecedenceConfig = {
+  company_identity: ['official', 'growjo', 'csv', 'public-dataset', 'manual'],
+  contact: ['growjo', 'hunter', 'public', 'unknown'],
+  person_identity: ['growjo', 'csv', 'public-dataset', 'public'],
+  technical_evidence: ['direct', 'official', 'github', 'public'],
+};
 
 export class ProviderRegistry {
   private readonly providers: ProviderConfig[] = [];
@@ -33,22 +72,45 @@ export class ProviderRegistry {
     return this.providers.map(p => p.provider);
   }
 
+  /** Field-level precedence configuration. */
+  fieldPrecedence: FieldPrecedenceConfig = { ...DEFAULT_FIELD_PRECEDENCE };
+
+  /**
+   * Set field-level precedence (overrides the default). No provider is
+   * inherently primary — the caller decides the order per field type.
+   */
+  setFieldPrecedence(config: Partial<FieldPrecedenceConfig>): void {
+    this.fieldPrecedence = { ...this.fieldPrecedence, ...config };
+  }
+
   /** Whether any contact-verification provider is available. */
   get hasContactProvider(): boolean {
     return this.providers.some(p => p.provider.capabilities.verifyContact && p.provider.enabled);
   }
 
   /**
-   * Waterfall lookup: try each provider in priority order.
-   * Returns all companies found (multiple providers may contribute
-   * for the same company — provenance is preserved).
+   * Waterfall lookup using field-level precedence for COMPANY_IDENTITY
+   * (spec §1, §2). No provider is inherently primary. Returns all companies
+   * found from providers consulted in the configured order; provenance is
+   * preserved per result.
    */
   async lookupCompany(nameOrDomain: string): Promise<ProviderLookupResult> {
     const companies: CanonicalCompany[] = [];
     const contributing: string[] = [];
     const tried: string[] = [];
 
-    for (const pc of this.providers) {
+    // Consult providers in the field-specific order for company identity.
+    // Fall back to global priority order for providers not listed in the field config.
+    const fieldOrder = this.fieldPrecedence.company_identity;
+    const orderedProviders = this.providers.slice().sort((a, b) => {
+      const ai = fieldOrder.indexOf(a.key);
+      const bi = fieldOrder.indexOf(b.key);
+      const pa = ai >= 0 ? ai : fieldOrder.length + a.priority;
+      const pb = bi >= 0 ? bi : fieldOrder.length + b.priority;
+      return pa - pb;
+    });
+
+    for (const pc of orderedProviders) {
       if (!pc.provider.enabled) continue;
       tried.push(pc.key);
       try {
@@ -65,7 +127,6 @@ export class ProviderRegistry {
       }
     }
 
-    // Also try CSVProvider-style parseCsv if the provider supports it
     return {
       companies,
       contributing_providers: [...new Set(contributing)],

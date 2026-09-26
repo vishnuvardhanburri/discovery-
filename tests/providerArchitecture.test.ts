@@ -405,7 +405,7 @@ run('OwnerPipeline — Growjo + providerCompanies both processed', () => {
 
   // Both providers found the same person — should be deduped to 1
   assert(result.candidates.length === 1, 'deduped to 1 (same person)');
-  assert(result.candidates[0].evidence.some(e => e.startsWith('GROWJO_SOURCE')), 'has Growjo evidence');
+  assert(result.candidates[0].evidence.some(e => e.startsWith('GROWJO_IDENTITY')), 'has Growjo identity evidence');
   assert(result.selectedCandidate !== null, 'HIGH candidate selected');
   assert(result.provenance === 'GROWJO_SOURCE', 'growjo takes priority for provenance');
 });

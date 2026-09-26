@@ -52,6 +52,8 @@
     "tests/sourceGraph.test.ts",
     "tests/email.test.ts",
     "tests/ownerPipeline.test.ts",
-    "tests/providerArchitecture.test.ts"
+    "tests/providerArchitecture.test.ts",
+    "tests/personDiscovery.test.ts",
+    "src/server/PersonDiscoveryEngine.ts"
   ]
 }

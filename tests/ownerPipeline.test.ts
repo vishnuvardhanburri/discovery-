@@ -70,7 +70,7 @@ const baseInput = {
   const growjo = mkGrowjo({ company: 'Acme Corp', domain: 'acme.com', primary_person_name: 'Sam Marketer', primary_title: 'Marketing Manager' });
   const r = OwnerPipeline.resolve({ ...baseInput, growjoData: growjo });
   ok('2 no selected (non-technical title)', r.selected === null, String(r.selected));
-  ok('2 no GROWJO candidate', r.candidates.every(c => !c.evidence[0]?.startsWith('GROWJO_SOURCE')), 'growjo candidate leaked');
+  ok('2 no GROWJO_IDENTITY candidate', r.candidates.every(c => !c.evidence[0]?.startsWith('GROWJO_IDENTITY')), 'growjo candidate leaked');
 }
 
 // ── 3. Growjo person but COMPANY IDENTITY mismatch (domain + name both wrong) ─

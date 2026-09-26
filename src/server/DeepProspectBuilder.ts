@@ -18,7 +18,7 @@ import path from 'path';
 import fs from 'fs';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
-import { PublicLinkDiscovery } from './PublicLinkDiscovery';
+import { PublicLinkDiscovery, categorizeProfessionalPath } from './PublicLinkDiscovery';
 import { PeopleExtractor } from './PeopleExtractor';
 import type {
   DeepBuilderOptions, DeepBuilderResult, DeepProspect, DeepSignal,
@@ -32,6 +32,7 @@ import type {
 import { DeepSignalExtractor } from './DeepSignalExtractor';
 import { ContactabilityFinder } from './ContactabilityFinder';
 import { OwnerPipeline } from './OwnerPipeline';
+import { PersonDiscoveryEngine } from './PersonDiscoveryEngine';
 import { GitHubDiscovery } from './GitHubDiscovery';
 import { ActivityTimeline } from './ActivityTimeline';
 import { IcpQualificationEngine, type IcpContext } from './IcpQualificationEngine';
@@ -192,15 +193,33 @@ export class DeepProspectBuilder {
     const prelim = IcpQualificationEngine.qualify(prelimCtx);
     this.onProgress?.('qualification', `Preliminary ICP: ${prelim.overall} (fit: ${prelim.fit}). Dimensions: ${prelim.dimensions.map(d => `${d.name}=${d.score}`).join(', ')}.`);
 
-    // 4) PEOPLE DISCOVERY (publicly listed professionals — people pages only)
+    // 4) PEOPLE DISCOVERY (autonomous — spec §3, §4, §5)
+    //    Provider-agnostic: discovers people from ANY source:
+    //      - Provider data (Growjo / CSV / licensed — any, not just Growjo)
+    //      - Public professional pages (PeopleExtractor on ALL professional pages)
+    //      - GitHub identities (company-linked repos)
+    //    No provider is required. If the input dataset has no people, person
+    //    discovery still runs independently via public source graph mining.
     const pagesForPeople = surface.discovered_pages.filter(p =>
-      p.category === 'team_people' || p.category === 'about'
+      p.category !== undefined && p.category !== 'other' && p.category !== 'homepage'
     );
-    const people = PeopleExtractor.extractFromPages(pagesForPeople, htmlByUrl, {
+    this.onProgress?.('people', `${pagesForPeople.length} professional page(s) for person discovery.`);
+
+    const people = PersonDiscoveryEngine.discover({
       company: surface.company,
-      technicalAreaHints: ['api', 'backend', 'infrastructure', 'platform', 'security']
+      domain: parsed.hostname,
+      technicalArea,
+      technicalAreaHints: ['api', 'backend', 'infrastructure', 'platform', 'security'],
+      providerCompanies: (this.providerCompanies ?? []).concat(this.growjoData ? [{
+        ...this.growjoData,
+        source: 'GROWJO',
+      }] as any : []),
+      pages: pagesForPeople,
+      htmlByUrl,
+      githubRepos: undefined, // filled after GitHubDiscovery runs below
+      onProgress: (stage, message) => this.onProgress?.('people', message),
     });
-    this.onProgress?.('people', `${people.length} owner candidate(s) extracted.`);
+    this.onProgress?.('people', `${people.length} owner candidate(s) discovered (provider-agnostic).`);
     for (const c of people) this.onProgress?.('people', `  [people] ${c.name} — ${c.role}  (${c.confidence})  @ ${c.source_urls[0]}`);
 
     // 5) OWNER RESOLUTION — Growjo people PRIMARY (role match → company
@@ -213,11 +232,11 @@ export class DeepProspectBuilder {
       company: surface.company,
       targetDomain: this.resolution?.official_domain || parsed.hostname,
       technicalArea,
-      classification: null, // deep finding detected later; responsibility uses surface technical area
+      classification: null,
       resolvedEvidence: [],
-      growjoData: this.growjoData ?? null,
-      providerCompanies: this.providerCompanies ?? null,
-      publicCandidates: people,
+      growjoData: null,           // PersonDiscoveryEngine already processed provider data
+      providerCompanies: null,    // PersonDiscoveryEngine already processed provider data
+      publicCandidates: people,   // unified candidates from all sources (provider-agnostic)
       onProgress: (stage, message) => this.onProgress?.('owners', message),
     });
     const selectedOwner = op.selected;
@@ -475,11 +494,16 @@ export class DeepProspectBuilder {
           if (loc.startsWith(origin) && !htmlByUrl.has(loc.replace(/\/$/, ''))) toFetch.push(loc);
           count++;
         }
-        // Boundedly fetch a few sitemap URLs to populate htmlByUrl.
+        // Categorize and boundedly fetch sitemap URLs so they feed person/signal
+        // discovery (not just 'other').
         for (const loc of toFetch.slice(0, this.maxDiscoveryPages)) {
           try {
             const r = await fetcher(loc, { method: 'GET', headers: { accept: 'text/html' }, signal: AbortSignal.timeout(6000) });
-            if (r && r.ok) { const h = await r.text(); addPage(loc, h, 'other'); }
+            if (r && r.ok) {
+              const h = await r.text();
+              const u = new URL(loc);
+              addPage(loc, h, categorizeProfessionalPath(u.pathname));
+            }
           } catch { /* skip */ }
         }
       }

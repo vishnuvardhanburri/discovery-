@@ -42,14 +42,14 @@ export interface PublicLinkDiscoveryOptions {
 }
 
 export const PROFESSIONAL_PATHS: Array<{ category: ProfessionalPageCategory; labels: string[] }> = [
-  { category: 'team_people', labels: ['/team', '/leadership', '/people', '/our-team', '/team/'] },
-  { category: 'engineering', labels: ['/engineering', '/technology', '/tech', '/developers', '/engineering-team'] },
-  { category: 'blog', labels: ['/blog', '/changelog'] },
-  { category: 'docs', labels: ['/docs', '/documentation'] },
-  { category: 'security', labels: ['/security', '/trust', '/trust-center'] },
-  { category: 'status_ops', labels: ['/status', '/incidents', '/system-status'] },
-  { category: 'about', labels: ['/about', '/company', '/press', '/about-us'] },
-  { category: 'hiring', labels: ['/careers', '/jobs', '/join-us'] }
+  { category: 'team_people', labels: ['/team', '/leadership', '/people', '/our-team', '/team/', '/leadership-team', '/leadership/', '/who-we-are/leadership', '/who-we-are/team', '/people/leadership', '/executive-team', '/meet-the-team', '/profile'] },
+  { category: 'engineering', labels: ['/engineering', '/technology', '/tech', '/developers', '/engineering-team', '/developer', '/platform', '/infrastructure'] },
+  { category: 'blog', labels: ['/blog', '/changelog', '/engineering-blog', '/tech-blog', '/medium'] },
+  { category: 'docs', labels: ['/docs', '/documentation', '/api', '/developers/'] },
+  { category: 'security', labels: ['/security', '/trust', '/trust-center', '/security/', '/bug-bounty'] },
+  { category: 'status_ops', labels: ['/status', '/incidents', '/system-status', '/status/'] },
+  { category: 'about', labels: ['/about', '/company', '/press', '/about-us', '/who-we-are', '/vision', '/our-story'] },
+  { category: 'hiring', labels: ['/careers', '/jobs', '/join-us', '/careers/'] }
 ];
 
 export class PublicLinkDiscovery {
@@ -89,16 +89,21 @@ export class PublicLinkDiscovery {
     };
 
     const visited = new Set<string>();
-    // Seed with homepage + high-signal professional pages first.
+    // Seed with homepage first, then a focused set of professional page paths.
     const seedPaths = this.resolveSeedPaths(baseUrl);
 
-    const queue: { url: string; categoryHint?: ProfessionalPageCategory }[] = [];
-    queue.push({ url: baseUrl.href, categoryHint: 'homepage' });
-    // Prioritise professional pages discovered via heuristics on the homepage,
-    // but also seed the canonical professional paths so they are attempted even
-    // if not linked from the homepage.
-    for (const p of seedPaths.slice(0, maxPages - 1)) {
-      queue.push({ url: p.url, categoryHint: p.category });
+    // Priority queue: homepage (0) first, then discovered links (1), then
+    // refill seeds (5), then initial seed paths (10). Discovered links are
+    // highest-value because they come from the company's actual navigation.
+    interface QueueItem { url: string; categoryHint?: ProfessionalPageCategory; priority: number; }
+    const queue: QueueItem[] = [];
+    queue.push({ url: baseUrl.href, categoryHint: 'homepage', priority: 0 });
+    // Seed only the first few high-signal paths up-front; the rest are added
+    // dynamically when budget remains (so discovered links always win).
+    const initialSeedBudget = Math.min(6, seedPaths.length);
+    let nextSeedIdx = initialSeedBudget;
+    for (const p of seedPaths.slice(0, initialSeedBudget)) {
+      queue.push({ url: p.url, categoryHint: p.category, priority: 10 });
     }
 
     let requests = 0;
@@ -148,8 +153,10 @@ export class PublicLinkDiscovery {
         // Discover more same-origin professional links from this page.
         const discovered = this.extractSameOriginLinks(html, targetUrl, origin);
         for (const link of discovered) {
-          if (!visited.has(link) && queue.length < maxPages) {
-            queue.push({ url: link, categoryHint: this.categorizePath(new URL(link).pathname) });
+          if (!visited.has(link) && queue.length < maxPages * 5) {
+            // Discovered links get high priority (priority=1) so they are
+            // processed BEFORE the remaining guessed seed paths (priority=10).
+            queue.push({ url: link, categoryHint: this.categorizePath(new URL(link).pathname), priority: 1 });
           }
         }
       }
@@ -170,9 +177,28 @@ export class PublicLinkDiscovery {
       return page;
     };
 
-    while (queue.length > 0) {
-      const next = queue.shift()!;
+    while (queue.length > 0 && requests < maxPages) {
+      // Priority selection: lowest priority number first, then FIFO.
+      // Search the FULL queue so discovered links (priority 1) are always
+      // preferred over seed paths (priority 10), regardless of position.
+      let bestIdx = 0;
+      for (let i = 1; i < queue.length; i++) {
+        if (queue[i].priority < queue[bestIdx].priority) bestIdx = i;
+      }
+      const next = queue.splice(bestIdx, 1)[0];
       await fetchPage(next.url, next.categoryHint);
+
+      // Dynamic refill: when the queue is low and budget remains, add more
+      // seed paths (priority 5) so they get a chance after discovered links
+      // are exhausted but before running out of budget.
+      if (queue.length < initialSeedBudget && nextSeedIdx < seedPaths.length && requests < maxPages) {
+        const refillCount = Math.min(4, seedPaths.length - nextSeedIdx);
+        for (let i = 0; i < refillCount; i++) {
+          const p = seedPaths[nextSeedIdx + i];
+          queue.push({ url: p.url, categoryHint: p.category, priority: 5 });
+        }
+        nextSeedIdx += refillCount;
+      }
     }
 
     return surface;
@@ -240,8 +266,13 @@ export function categorizeProfessionalPath(pathname: string): ProfessionalPageCa
   for (const { category, labels } of PROFESSIONAL_PATHS) {
     for (const label of labels) {
       const needle = label.replace(/^\/+/, '').replace(/\/$/, '');
+      // Match: exact path, path-starts-with label, first-segment match, or any segment
       if (p === '/' + needle || p.startsWith('/' + needle) || first === needle) {
         return category;
+      }
+      // Broader: any path segment matches a label segment (e.g. /who-we-are/leadership-team → "leadership-team")
+      for (const seg of segments) {
+        if (seg === needle) return category;
       }
     }
   }

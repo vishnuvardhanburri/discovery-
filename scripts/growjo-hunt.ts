@@ -113,6 +113,8 @@ interface HuntResult {
   growjo_person: boolean;
   provider_sources: string[];
   error: string | null;
+  /** Full deep prospect (for show/why commands). */
+  prospect?: any;
 }
 
 async function runOne(
@@ -136,7 +138,7 @@ async function runOne(
     fetcher: boundedFetch as any,
     saveArtifact,
     artifactsBaseDir: process.cwd(),
-    maxDiscoveryPages: 8,
+    maxDiscoveryPages: 15,
     discoveryDelayMs: 40,
     discoveryTimeoutMs: 6000,
     observationDelayMs: 40,
@@ -159,6 +161,7 @@ async function runOne(
 
   try {
     const { prospect } = await withTimeout(builder.build(targetUrl), 90000);
+    result.prospect = prospect;
     result.decision = prospect.decision;
     result.confidence = prospect.confidence;
     result.finding = prospect.deep_finding ? `${prospect.deep_finding.finding_type} / ${prospect.deep_finding.confidence}` : (prospect.findings ? prospect.findings.finding_type : 'NONE');
@@ -215,7 +218,117 @@ function loadCsv(csvPath: string): { companies: CanonicalCompany[]; format: stri
   throw new Error(`Could not parse CSV: ${csvPath}`);
 }
 
-// ── Main ──
+// ── Show commands ──
+
+async function showCompany(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) {
+    console.log('  (no prospect data — research failed)');
+    return;
+  }
+  console.log(`\n── COMPANY SURFACE ──`);
+  console.log(`  company:         ${p.company}`);
+  console.log(`  domain:          ${p.domain}`);
+  console.log(`  industry:        ${p.industry}`);
+  console.log(`  fit:             ${p.fit}`);
+  console.log(`  public surface:  ${p.public_surface?.discovered_pages?.length || 0} page(s)`);
+  for (const pg of (p.public_surface?.discovered_pages || [])) {
+    console.log(`    ${pg.category || '??'}  ${pg.path || pg.url}`);
+  }
+  console.log(`\n── TECHNICAL SIGNALS ──`);
+  for (const sig of (p.technical_signals || [])) {
+    console.log(`  [${sig.signal_strength}] ${sig.type} — ${sig.relevance}  (${sig.source_url})`);
+  }
+  if (!p.technical_signals?.length) console.log('  (none)');
+  console.log(`\n── FINDING ──`);
+  console.log(`  ${p.deep_finding?.finding_type || p.findings?.finding_type || 'NONE'}  (${p.deep_finding?.confidence || p.findings?.impact_severity || '?'})`);
+  if (p.deep_finding?.explanation) console.log(`  explanation: ${p.deep_finding.explanation.slice(0, 120)}`);
+  console.log(`\n── DECISION ──`);
+  console.log(`  ${p.decision} (confidence ${p.confidence})`);
+}
+
+async function showPeople(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) {
+    console.log('  (no prospect data — research failed)');
+    return;
+  }
+  console.log(`\n── PEOPLE DISCOVERED ──`);
+  for (const person of (p.people || [])) {
+    console.log(`  ${person.name} — ${person.role} (${person.confidence})`);
+    console.log(`    sources: ${person.source_urls.join(', ')}`);
+    console.log(`    evidence: ${(person.evidence || []).slice(0, 2).join(' | ')}`);
+  }
+  if (!p.people?.length) console.log('  (no people discovered — not invented)');
+  console.log(`\n── OWNER CANDIDATES ──`);
+  for (const c of (p.owner_candidates || [])) {
+    console.log(`  ${c.name} — ${c.role} (${c.confidence})  explicit=${c.explicit_evidence}`);
+  }
+  if (!p.owner_candidates?.length) console.log('  (none)');
+  console.log(`\n── SELECTED OWNER ──`);
+  if (p.selected_owner) {
+    console.log(`  ${p.selected_owner.name} — ${p.selected_owner.role} (${p.selected_owner.confidence})`);
+    console.log(`  provenance: ${(p.selected_owner as any).deep_owner_provenance || '(none)'}`);
+    console.log(`  finding link: ${p.selected_owner.finding_link}`);
+    console.log(`  responsibility: ${p.selected_owner.responsibility_match}`);
+    console.log(`  evidence:`);
+    for (const e of (p.selected_owner.owner_evidence || [])) {
+      console.log(`    — ${e.slice(0, 120)}`);
+    }
+  } else {
+    console.log('  (none — HIGH-only gate: no verified person reached HIGH ownership confidence)');
+  }
+  console.log(`\n── CONTACTABILITY ──`);
+  for (const c of (p.contactability || [])) {
+    console.log(`  [${c.type}] ${(c.email || c.url || c.phone || '').slice(0, 60)}  confidence=${c.confidence}`);
+  }
+  if (!p.contactability?.length) console.log('  (no professional contact channels found)');
+}
+
+async function showOwnerReasoning(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) {
+    console.log('  (no prospect data — research failed)');
+    return;
+  }
+  console.log(`\n── OWNER RESOLUTION REASONING ──`);
+  console.log(`  company: ${p.company}`);
+  console.log(`  finding: ${p.deep_finding?.finding_type || p.findings?.finding_type || 'NONE'}`);
+  console.log(`  technical area: ${p.deep_finding?.technical_area || 'n/a'}`);
+
+  console.log(`\n  Candidate pool (${p.owner_candidates?.length || 0} candidates):`);
+  for (const c of (p.owner_candidates || [])) {
+    console.log(`    ${c.name} — ${c.role}  (${c.confidence})  explicit=${c.explicit_evidence}`);
+    console.log(`      relationship: ${c.relationship_to_area}`);
+    console.log(`      evidence: ${(c.evidence || []).slice(0, 1).join(' | ').slice(0, 100)}`);
+  }
+
+  if (p.selected_owner) {
+    console.log(`\n  ✓ Selected: ${p.selected_owner.name} (${p.selected_owner.confidence})`);
+    console.log(`    provenance: ${(p.selected_owner as any).deep_owner_provenance || '(none)'}`);
+    console.log(`    HIGH-only gate: passed (candidate confidence = HIGH)`);
+  } else {
+    console.log(`\n  ✗ No owner selected — HIGH-only gate not met.`);
+    console.log(`    (identity confidence ≠ ownership confidence — a person can be`);
+    console.log(`     clearly listed (HIGH identity) but not a verified technical owner)`);
+    console.log(`    (Strong ICP + good research + no HIGH owner → RESEARCH_MORE, not NO_GO)`);
+  }
+
+  console.log(`\n  Evidence lineage:`);
+  if (p.evidence && p.evidence.length > 0) {
+    for (const e of p.evidence.slice(0, 10)) {
+      console.log(`    [${e.source_type || '?'}] ${e.public_url || e.id}  provenance=${e.evidence_origin}`);
+    }
+  } else {
+    console.log('    (no evidence collected)');
+  }
+
+  console.log(`\n  Decision: ${p.decision} (confidence ${p.confidence})`);
+  if (p.decision === 'RESEARCH_MORE' && !p.selected_owner) {
+    console.log(`  → Strong technical surface but no verified HIGH-confidence owner.`);
+    console.log(`  → Next step: deepen person discovery (engineering pages, GitHub contributors, blog authors).`);
+  }
+}
 
 async function main(): Promise<void> {
   const { csv, batch, start, domains, companies: companyNames, research } = parseArgs(process.argv);
@@ -299,6 +412,40 @@ async function main(): Promise<void> {
       }
     }
     printSummary(results);
+    return;
+  }
+
+  // ── Mode --show (REPL-style display subcommands) ──
+  // Usage: npx tsx scripts/growjo-hunt.ts show company <domain>
+  //        npx tsx scripts/growjo-hunt.ts show people <domain>
+  //        npx tsx scripts/growjo-hunt.ts why owner <domain>
+  const subcommand = process.argv.slice(2).find(a => !a.startsWith('--'));
+  if (subcommand === 'show' || subcommand === 'why') {
+    const subArgs = process.argv.slice(2).filter(a => !a.startsWith('--'));
+    const mode = subArgs[0]; // 'show' or 'why'
+    const aspect = subArgs[1];  // 'company' | 'people' | 'owner'
+    const targetDomain = subArgs[2];
+    if (!aspect || !targetDomain) {
+      console.error(`Usage: npx tsx scripts/growjo-hunt.ts ${mode} ${aspect || '<aspect>'} <domain>`);
+      console.error(`  show company <domain>  — full company surface + signals + findings`);
+      console.error(`  show people <domain>   — discovered people + owner candidates`);
+      console.error(`  why owner <domain>     — owner resolution reasoning`);
+      process.exit(1);
+    }
+
+    console.log(`XAVIRA SHOW — ${mode} ${aspect} for ${targetDomain}`);
+    console.log(`Providers: (none — direct domain seed, no Growjo required)`);
+
+    const target = `https://${targetDomain.replace(/^https?:\/\//, '')}`;
+    const result = await runOne(null, targetDomain, target, []);
+
+    if (aspect === 'company') {
+      await showCompany(target, result, targetDomain);
+    } else if (aspect === 'people') {
+      await showPeople(target, result, targetDomain);
+    } else if (aspect === 'owner' || (mode === 'why' && aspect === 'owner')) {
+      await showOwnerReasoning(target, result, targetDomain);
+    }
     return;
   }
 

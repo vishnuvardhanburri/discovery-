@@ -1,23 +1,21 @@
 /**
  * XAVIRA — OWNER PIPELINE (orchestrator integration)
  * ─────────────────────────────────────────────────────────────────────────────
- * Owner resolution topology:
+ * Owner resolution topology (provider-agnostic — spec §1, §7):
  *
- *   Finding → responsibility profile → Growjo people → role match
- *          → company identity match → public corroboration → confidence
+ *   Finding → responsibility profile
+ *          ↓
+ *   PersonDiscoveryEngine candidates (ANY provider + public source graph)
+ *          ↓
+ *   technical responsibility profile → role relevance → company match
+ *          ↓
+ *   explicit evidence → HIGH-only gate (DeepOwnerResolver)
  *
- * Growjo people are the PRIMARY candidate source (licensed identity + role +
- * company record). A Growjo person becomes a candidate ONLY when all three
- * explicit-evidence gates hold:
- *   - identity      : a real person name is present
- *   - role match    : the title maps to a relevant technical role (CANDIDATE_ROLES)
- *   - company match : the Growjo company domain equals the resolved official domain
- *
- * Public candidates (PeopleExtractor on the company's team/people/about pages)
- * provide OPTIONAL corroboration: a same-name public listing strengthens the
- * evidence (and adds OFFICIAL_COMPANY_SOURCE provenance) but is NOT required
- * for HIGH confidence — "the person's name does NOT have to appear on the
- * company's own team page."
+ * No provider is inherently primary. PersonDiscoveryEngine (via
+ * PersonDiscoveryEngine.discover) collects candidates from:
+ *   - Provider data (Growjo / CSV / licensed — whichever carry people)
+ *   - Public professional pages (PeopleExtractor on ALL page categories)
+ *   - GitHub identities (company-linked repos)
  *
  * The HIGH-only gate is enforced by DeepOwnerResolver.resolve (unchanged). This
  * module never promotes LOW/MEDIUM and never invents owners.
@@ -46,7 +44,7 @@ const ROLE_KEYWORDS = [
 
 /** Evidence-provenance tags kept as the first token of an evidence string. */
 const EVID_TAGS = {
-  GROWJO: 'GROWJO_SOURCE',
+  GROWJO: 'GROWJO_IDENTITY',
   OFFICIAL_COMPANY: 'OFFICIAL_COMPANY_SOURCE',
   PUBLIC_PROFESSIONAL: 'PUBLIC_PROFESSIONAL_SOURCE',
 } as const;
@@ -167,20 +165,26 @@ interface ProviderCompanyLike {
   source_url: string | null;
 }
 
-/** Merge Growjo (primary) candidates with public candidates; same-name corroborates. */
+/**
+ * Merge provider-derived candidates with public candidates.
+ * Both are treated as PRIMARY candidate sources (spec §3 — no single provider
+ * is required). Candidates from different sources referring to the same real
+ * person (matched by canonical name + shared source URL or role) are merged,
+ * preserving all provenance tags.
+ */
 function mergeCandidates(
-  growjoCandidates: OwnerCandidate[],
+  providerCandidates: OwnerCandidate[],
   publicCandidates: OwnerCandidate[],
   onProgress?: (stage: DeepStage, message: string) => void
 ): OwnerCandidate[] {
   const merged: OwnerCandidate[] = [];
-  const byName = new Map<string, number>(); // name -> index in merged
+  const byName = new Map<string, number>();
 
-  for (const c of growjoCandidates) {
+  for (const c of providerCandidates) {
     const key = canonicalName(c.name);
     const idx = byName.get(key);
     if (idx !== undefined) {
-      // Same person already present (from another provider) — merge evidence.
+      // Same person already present — merge evidence.
       const existing = merged[idx];
       existing.evidence = Array.from(new Set([...existing.evidence, ...c.evidence]));
       existing.source_urls = Array.from(new Set([...existing.source_urls, ...c.source_urls]));
@@ -200,8 +204,10 @@ function mergeCandidates(
       existing.evidence = Array.from(new Set([...existing.evidence, ...pub.evidence]));
       existing.source_urls = Array.from(new Set([...existing.source_urls, ...pub.source_urls]));
       existing.explicit_evidence = existing.explicit_evidence || pub.explicit_evidence;
-      onProgress?.('people', `  [corroborate] ${existing.name} — public listing corroborates Growjo identity.`);
+      onProgress?.('people', `  [corroborate] ${existing.name} — public listing corroborates provider identity.`);
     } else {
+      // Public candidate is a PRIMARY candidate (not just corroboration).
+      // When no provider data exists, public candidates are the sole source.
       byName.set(canonicalName(pub.name), merged.length);
       merged.push(pub);
     }
@@ -211,9 +217,16 @@ function mergeCandidates(
 
 export class OwnerPipeline {
   /**
-   * Resolve the technical owner using Growjo as the primary identity source.
-   * The HIGH-only gate is delegated to DeepOwnerResolver (unchanged) — this
-   * method never promotes LOW/MEDIUM and never invents owners.
+   * Resolve the technical owner using person-discovery candidates as the
+   * unified candidate pool. The HIGH-only gate is delegated to
+   * DeepOwnerResolver (unchanged) — this method never promotes LOW/MEDIUM
+   * and never invents owners.
+   *
+   * PersonDiscoveryEngine already processed all provider data + public pages,
+   * so `publicCandidates` here is the FULL candidate pool (provider-agnostic).
+   * For backward compatibility, `growjoData` and `providerCompanies` can still
+   * be passed — they are processed in waterfall order and deduped against
+   * public candidates by canonical name.
    */
   static resolve(input: OwnerPipelineInput): OwnerPipelineResult {
     const {
@@ -252,11 +265,14 @@ export class OwnerPipeline {
       }
     }
 
-    // 4) public corroboration (optional — does not weaken the gate)
+    // 4) public candidates (primary — spec §3: autonomous discovery independent
+    //    of any provider). PersonDiscoveryEngine already merged provider data
+    //    and public-page candidates into this pool, but for backward compat
+    //    growjoData/providerCompanies are also processed above.
     const publicSelected = publicCandidates.length > 0;
-    onProgress?.('owners', `Public candidates from company people pages: ${publicCandidates.length}.`);
+    onProgress?.('owners', `Candidates from person discovery (provider-agnostic): ${publicCandidates.length}.`);
 
-    // 5) merge provider (primary) + public (corroboration); dedupe by canonical name
+    // 5) merge provider (primary) + public (also primary); dedupe by canonical name
     const merged = mergeCandidates(providerCandidates, publicCandidates, onProgress);
 
     // 6) select best + HIGH-only resolve (gate NOT weakened)
@@ -268,12 +284,13 @@ export class OwnerPipeline {
       : null;
 
     // 7) provenance: primary layer that produced the selected owner.
-    // Public candidates arrive pre-filtered to company people/about pages
-    // (OFFICIAL_COMPANY_SOURCE); Growjo candidates carry a GROWJO_SOURCE tag.
+    // PersonDiscoveryEngine tags evidence with GROWJO_IDENTITY or
+    // OFFICIAL_COMPANY_SOURCE; public-page candidates carry OFFICIAL_COMPANY_SOURCE.
     let provenance: OwnerProvenance = 'XAVIRA_INFERENCE';
     if (selected && sel.candidate) {
       const ev = sel.candidate.evidence.join('\n');
-      if (ev.startsWith(`GROWJO_SOURCE`)) provenance = 'GROWJO_SOURCE';
+      if (ev.startsWith(`GROWJO_IDENTITY`)) provenance = 'GROWJO_SOURCE';
+      else if (ev.startsWith(`OFFICIAL_COMPANY_SOURCE`)) provenance = 'OFFICIAL_COMPANY_SOURCE';
       else provenance = 'OFFICIAL_COMPANY_SOURCE';
     }
 

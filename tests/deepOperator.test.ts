@@ -504,7 +504,7 @@ async function main() {
     assert((prospect.selected_owner as any).deep_owner_provenance === 'GROWJO_SOURCE',
       `owner provenance is GROWJO_SOURCE (got ${(prospect.selected_owner as any).deep_owner_provenance})`);
     const ev0 = prospect.selected_owner!.owner_evidence[0] || '';
-    assert(ev0.includes('GROWJO_SOURCE'), 'owner evidence carries GROWJO_SOURCE tag');
+    assert(ev0.includes('GROWJO_IDENTITY'), 'owner evidence carries GROWJO_IDENTITY tag');
     assert(ev0.includes('is listed as'), 'owner evidence string preserves "is listed as" for the engine');
 
     // Honest gates: defensible finding + HIGH growjo owner + contact -> OUTREACH_READY

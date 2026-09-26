@@ -8,6 +8,14 @@
  * The crawler MUST check the registry before visiting any URL.
  * Sources are prioritized based on technical relevance, company relationship,
  * source quality, freshness, and likelihood of useful evidence.
+ *
+ * Unknown-source policy (spec §10):
+ *   UNKNOWN SOURCE → DISCOVERED → CLASSIFY → POLICY CHECK → TRUST LEVEL → ALLOW/BLOCK
+ *
+ * Unknown sources may be discovered (classification attempted), but they are
+ * NOT automatically trusted as evidence. A source must reach TRUSTED status
+ * — via explicit allow or classification + policy — before it contributes
+ * evidence. DISCOVERED_EXTERNAL_SOURCE ≠ TRUSTED_TECHNICAL_EVIDENCE.
  */
 import type { SourceEntry, SourceCategory } from './Model';
 
@@ -20,6 +28,38 @@ interface AuthorityMetadata {
   rate_limited?: boolean;
   /** Content language hint. */
   language?: string;
+}
+
+/**
+ * Trust level for a discovered source. Sources progress through these stages
+ * before being allowed to contribute evidence.
+ */
+export type SourceTrustLevel =
+  | 'DISCOVERED'          // seen for the first time, not yet classified
+  | 'CLASSIFIED'          // category identified, policy check pending
+  | 'POLICY_CHECK'        // policy rules evaluated
+  | 'TRUSTED'             // allowed to contribute evidence
+  | 'BLOCKED';            // explicitly blocked by policy
+
+/**
+ * Result of checking a source URL against the registry's classification +
+ * policy pipeline. Distinguishes "discovered but untrusted" from "trusted".
+ */
+export interface SourceClassification {
+  /** The URL that was checked. */
+  url: string;
+  /** Resolved domain. */
+  domain: string;
+  /** Classified category (or 'OTHER' if unknown). */
+  category: SourceCategory;
+  /** Trust level after policy evaluation. */
+  trust_level: SourceTrustLevel;
+  /** Human-readable reason for the trust decision. */
+  reason: string;
+  /** Whether the source is allowed to contribute evidence (TRUSTED only). */
+  is_trusted: boolean;
+  /** Whether the source was previously registered (explicitly known). */
+  was_known: boolean;
 }
 
 export class SourceRegistry {
@@ -36,16 +76,141 @@ export class SourceRegistry {
     for (const s of sources) this.register(s);
   }
 
-  /** Check if a URL is allowed to be crawled. */
+  /** Check if a URL is allowed to be crawled AND trusted for evidence. */
   isAllowed(url: string): boolean {
+    const classification = this.classify(url);
+    return classification.is_trusted;
+  }
+
+  /**
+   * Classify and trust-evaluate a source URL.
+   * Implements the DISCOVERED → CLASSIFY → POLICY_CHECK → TRUST LEVEL flow.
+   * Unknown sources are classified (not outright denied), but must pass
+   * the policy check to become TRUSTED.
+   */
+  classify(url: string): SourceClassification {
+    let domain: string;
     try {
-      const domain = new URL(url).hostname.replace(/^www\./, '');
-      const entry = this.sources.get(this.canonicalDomain(domain));
-      if (!entry) return false; // unknown → not allowed (explicit allow-list)
-      return entry.allowed && !entry.blocked;
+      domain = new URL(url).hostname.replace(/^www\./, '');
     } catch {
-      return false;
+      return {
+        url, domain: '', category: 'OTHER', trust_level: 'BLOCKED',
+        reason: 'Malformed URL — cannot classify.', is_trusted: false, was_known: false,
+      };
     }
+
+    const canonicalDomain = this.canonicalDomain(domain);
+    const existing = this.sources.get(canonicalDomain);
+
+    // ── Stage 1: DISCOVERED / KNOWN ──
+    if (!existing) {
+      // Unknown source — classify by domain pattern + path heuristics.
+      const category = this.classifyDomain(domain);
+      // Policy: unknown sources are classified but start as CLASSIFIED (not trusted).
+      // They must pass the policy check to contribute evidence.
+      const policyResult = this.applyPolicy(domain, url, category, false);
+      return {
+        url, domain, category,
+        trust_level: policyResult.trust_level,
+        reason: policyResult.reason,
+        is_trusted: policyResult.trust_level === 'TRUSTED',
+        was_known: false,
+      };
+    }
+
+    // ── Known source: DISCOVERED → policy check ──
+    if (existing.blocked) {
+      return {
+        url, domain, category: existing.category, trust_level: 'BLOCKED',
+        reason: `Explicitly blocked in registry (${existing.notes || 'n/a'}).`,
+        is_trusted: false, was_known: true,
+      };
+    }
+
+    // Apply policy rules to known sources
+    const policyResult = this.applyPolicy(domain, url, existing.category, true, existing);
+    return {
+      url, domain, category: existing.category,
+      trust_level: policyResult.trust_level,
+      reason: policyResult.reason,
+      is_trusted: policyResult.trust_level === 'TRUSTED',
+      was_known: true,
+    };
+  }
+
+  /**
+   * Classify a domain into a SourceCategory using heuristics.
+   */
+  private classifyDomain(domain: string): SourceCategory {
+    const d = domain.toLowerCase();
+    if (d.includes('github.com') || d.includes('raw.githubusercontent.com') || d.includes('api.github.com')) return 'GITHUB';
+    if (d.includes('linkedin.com')) return 'PROFESSIONAL';
+    if (d.includes('vercel.app') || d.includes('vercel.com') || d.includes('netlify.app')) return 'PROFESSIONAL';
+    // Company's own infrastructure domains are COMPANY
+    // Others default to OTHER — they remain untrusted until explicitly registered
+    return 'OTHER';
+  }
+
+  /**
+   * Policy check: evaluate whether a source should be trusted based on its
+   * category, known status, and authority metadata.
+   * Key rule (spec §10): DISCOVERED_EXTERNAL_SOURCE ≠ TRUSTED_TECHNICAL_EVIDENCE.
+   * Unknown sources (wasKnown=false) in category 'OTHER' are NOT trusted.
+   */
+  private applyPolicy(
+    domain: string,
+    url: string,
+    category: SourceCategory,
+    wasKnown: boolean,
+    entry?: SourceEntry,
+  ): { trust_level: SourceTrustLevel; reason: string } {
+    // Explicitly blocked entries
+    if (entry && entry.blocked) {
+      return { trust_level: 'BLOCKED', reason: 'Explicitly blocked in registry.' };
+    }
+
+    // Explicitly denied known entries
+    if (entry && !entry.allowed) {
+      return { trust_level: 'BLOCKED', reason: `Allowed=${entry.allowed} (explicitly denied).` };
+    }
+
+    // Unknown sources (not in registry) — classify as CLASSIFIED but not trusted
+    // unless they fall into a category that is implicitly trustworthy.
+    if (!wasKnown) {
+      const trustScore = this.implicitTrustScore(domain, url, category);
+      if (trustScore >= 85) {
+        return { trust_level: 'TRUSTED', reason: `Unknown source ${domain} classified as ${category} with high implicit trust (score ${trustScore}).` };
+      }
+      return {
+        trust_level: 'POLICY_CHECK',
+        reason: `Unknown source ${domain}: classified as ${category} but implicit trust score ${trustScore} < 85. Not trusted as evidence.`
+      };
+    }
+
+    // Known + allowed sources are trusted if they have sufficient authority
+    const trustScore = (entry?.authority_metadata as any)?.trust_score ?? 0;
+    if (trustScore >= 50) {
+      return { trust_level: 'TRUSTED', reason: `Known source ${domain} trusted (score ${trustScore}).` };
+    }
+    return {
+      trust_level: 'POLICY_CHECK',
+      reason: `Known source ${domain}: authority trust score ${trustScore} below threshold (50).`
+    };
+  }
+
+  /**
+   * Compute an implicit trust score for an unknown source based on domain
+   * patterns and the URL path. High scores for well-known platform domains.
+   */
+  private implicitTrustScore(domain: string, url: string, category: SourceCategory): number {
+    const d = domain.toLowerCase();
+    // Well-known technical platforms
+    const platforms = ['github.com', 'raw.githubusercontent.com', 'api.github.com',
+      'linkedin.com', 'vercel.com', 'vercel.app', 'netlify.app'];
+    if (platforms.some(p => d.includes(p))) return 90;
+    // Subdomains of the target company (e.g. engineering.company.com)
+    if (d.includes('engineering') || d.includes('tech') || d.includes('blog')) return 70;
+    return 0;
   }
 
   /** Look up a source entry by domain. */
