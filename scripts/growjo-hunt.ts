@@ -27,6 +27,7 @@ import type { CanonicalCompany, CanonicalPerson } from '../src/server/providers/
 import type { CompanyResolution, DeepBuilderResult } from '../src/server/DeepTypes';
 import type { ProviderCompanyLike } from '../src/server/DeepTypes';
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
+import { StatePersistence } from '../src/server/StatePersistence';
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -39,6 +40,9 @@ function saveArtifact(p: string, data: string): void {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, data, 'utf8');
 }
+
+/** Shared state persistence directory for resume/refresh/changes. */
+const statePersistence = new StatePersistence(path.join(process.cwd(), 'artifacts', 'intelligence'));
 
 const boundedFetch: typeof fetch = (async (url: string, init: any) => {
   const ctrl = new AbortController();
@@ -147,6 +151,7 @@ async function runOne(
     growjo: company && company.source === 'GROWJO' ? company as any : null,
     providerCompanies,
     resolution,
+    statePersistence,
   });
 
   const result: HuntResult = {
@@ -449,13 +454,169 @@ async function main(): Promise<void> {
     return;
   }
 
+  // ── Mode: refresh <domain> — re-research a single company with fresh state ──
+  if (subcommand === 'refresh') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts refresh <domain>');
+      process.exit(1);
+    }
+    console.log(`XAVIRA REFRESH — re-researching ${domain}`);
+    console.log(`Providers: (dataset-first; live-web fallback when incomplete/stale)`);
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const result = await runOne(company, domain, target, company ? [company] : []);
+    if (result.prospect) {
+      showChanges(result.prospect, domain);
+    } else {
+      console.log('  (no prospect data — refresh failed)');
+    }
+    return;
+  }
+
+  // ── Mode: refresh all — re-research all companies with stored state ──
+  if (subcommand === 'refresh-all' || (subcommand === 'refresh' && process.argv.slice(2).includes('--all'))) {
+    const allDomains = parseRefreshAll(process.argv, csv);
+    console.log(`XAVIRA REFRESH-ALL — re-researching ${allDomains.length} company/companies`);
+    const results: HuntResult[] = [];
+    let i = 0;
+    for (const d of allDomains) {
+      i++;
+      try {
+        const csvCompanies = csv ? loadCsv(csv).companies : [];
+        const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === d.toLowerCase()) || null;
+        const target = d.startsWith('http') ? d : `https://${d}`;
+        console.log(`\n[${i}/${allDomains.length}] Refreshing ${d}...`);
+        results.push(await runOne(company, d, target, company ? [company] : []));
+      } catch (e: any) {
+        console.log(`\n[${i}/${allDomains.length}] ${d} — FAILED: ${e?.message || String(e)}`);
+        results.push({ company: d, domain: d, sector: 'unknown', decision: 'ERROR', confidence: null, finding: '', findingProvenance: '', owner: null, ownerConfidence: null, ownerProvenance: null, people: 0, owner_candidates: 0, growjo_person: false, provider_sources: [], error: e?.message || String(e) });
+      }
+    }
+    printSummary(results);
+    return;
+  }
+
+  // ── Mode: changes <domain> — show diff vs. previously stored state ──
+  if (subcommand === 'changes') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts changes <domain>');
+      process.exit(1);
+    }
+    console.log(`XAVIRA CHANGES — diff for ${domain}`);
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const result = await runOne(company, domain, target, company ? [company] : []);
+    if (result.prospect) {
+      showChanges(result.prospect, domain);
+    } else {
+      console.log('  (no prospect data — cannot diff)');
+    }
+    return;
+  }
+
+  // ── Mode: resume <domain> — resume interrupted research ──
+  if (subcommand === 'resume') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts resume <domain>');
+      process.exit(1);
+    }
+    console.log(`XAVIRA RESUME — continuing research for ${domain}`);
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const result = await runOne(company, domain, target, company ? [company] : []);
+    if (result.prospect) {
+      console.log(`\n── RESUME SUMMARY ──`);
+      console.log(`  decision:    ${result.prospect.decision} (confidence ${result.prospect.confidence})`);
+      console.log(`  finding:     ${result.prospect.deep_finding?.finding_type || result.prospect.findings?.finding_type || 'NONE'}`);
+      console.log(`  owner:       ${result.prospect.selected_owner?.name || '(none)'}`);
+      console.log(`  people:      ${result.prospect.people.length}`);
+      console.log(`  evidence:    ${result.prospect.evidence.length}`);
+      console.log(`  sources:     ${result.prospect.public_surface?.discovered_pages?.length || 0}`);
+      if ((result.prospect as any).changes && (result.prospect as any).changes.length > 0) {
+        console.log(`  changes vs prior: ${(result.prospect as any).changes.length}`);
+        for (const ch of (result.prospect as any).changes) {
+          console.log(`    [${ch.kind}] ${ch.category}: ${ch.change}`);
+        }
+      } else {
+        console.log(`  changes vs prior: (none — first run)`);
+      }
+    }
+    return;
+  }
+
   console.error('Usage: npx tsx scripts/growjo-hunt.ts <csv> [options]');
   console.error('       npx tsx scripts/growjo-hunt.ts --domains "vercel.com,supabase.com"');
   console.error('       npx tsx scripts/growjo-hunt.ts --companies "Vercel,Supabase"');
   console.error('       npx tsx scripts/growjo-hunt.ts --research https://vercel.com');
+  console.error('       npx tsx scripts/growjo-hunt.ts refresh <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts refresh --all [--csv <csv>]');
+  console.error('       npx tsx scripts/growjo-hunt.ts changes <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts resume <domain>');
   console.error('Options: --batch N  --start K');
   process.exit(1);
 }
+
+// ── Changes display ──
+
+function showChanges(prospect: any, domain: string): void {
+  console.log(`\n── CHANGE DETECTION — ${prospect.company} (${domain}) ──`);
+  const changes = prospect.changes || [];
+  if (changes.length === 0) {
+    console.log('  (no changes detected — first run or all UNCHANGED)');
+  } else {
+    const byKind = changes.reduce((acc: Record<string, number>, c: any) => { acc[c.kind] = (acc[c.kind] || 0) + 1; return acc; }, {});
+    console.log(`  ${changes.length} change(s): ${Object.entries(byKind).map(([k, v]) => `${k}×${v}`).join('  ')}`);
+    console.log('');
+    for (const c of changes) {
+      const marker: Record<string, string> = { NEW: '✚', CHANGED: '~', UNCHANGED: '=', REMOVED: '✖', UNKNOWN: '?' };
+      console.log(`  ${marker[c.kind] || '?'} [${c.category}] ${c.entity.slice(0, 50)}`);
+      console.log(`      ${c.change}`);
+    }
+  }
+
+  console.log(`\n── LIVE-WEB RESEARCH ──`);
+  console.log(`  researched:   ${prospect.live_web_researched || false}`);
+  console.log(`  evidence:     ${prospect.live_web_evidence?.length || 0}`);
+  console.log(`  search queries: ${prospect.search_queries?.length || 0}`);
+  if (prospect.search_queries && prospect.search_queries.length > 0) {
+    for (const q of prospect.search_queries) {
+      console.log(`    ${q.cached ? '[cached]' : '[new]'} "${q.query}" → ${q.results} result(s)`);
+    }
+  }
+
+  console.log(`\n── DATA COMPLETENESS ──`);
+  const ds = prospect.data_sufficiency;
+  if (ds) {
+    console.log(`  sufficient:           ${ds.sufficient}`);
+    console.log(`  needs_live_research:  ${ds.needs_live_research}`);
+    if (ds.missing.length > 0) console.log(`  missing:              ${ds.missing.join(', ')}`);
+    if (ds.stale.length > 0) console.log(`  stale:                ${ds.stale.join(', ')}`);
+    for (const r of ds.reasons) console.log(`  reason: ${r}`);
+  } else {
+    console.log('  (no sufficiency data)');
+  }
+}
+
+// ── Parse domains for refresh --all ──
+
+function parseRefreshAll(argv: string[], csv: string | null): string[] {
+  const domainsFlag = argv.join(' ').match(/--domains\s+([\w.,\-:]+)/);
+  if (domainsFlag) {
+    return domainsFlag[1].split(',').map(d => d.trim()).filter(Boolean);
+  }
+  if (csv) {
+    return loadCsv(csv).companies.map(c => c.domain || c.canonical_name).filter(Boolean);
+  }
+  return [];
+}
+
+// ── Summary ──
 
 function printSummary(results: HuntResult[]): void {
   console.log('\n══════════════════════════════════════════════════════════════════');

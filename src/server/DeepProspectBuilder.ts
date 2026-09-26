@@ -37,6 +37,10 @@ import { GitHubDiscovery } from './GitHubDiscovery';
 import { ActivityTimeline } from './ActivityTimeline';
 import { IcpQualificationEngine, type IcpContext } from './IcpQualificationEngine';
 import { DeepEmailGenerator } from './DeepEmailGenerator';
+import { DataSufficiencyChecker } from './DataSufficiencyChecker';
+import { LiveWebResearchProvider } from './LiveWebResearchProvider';
+import { ChangeDetector, snapshotFromProspect } from './ChangeDetector';
+import { FreshnessEngine } from './FreshnessEngine';
 
 /**
  * Language cues that an observation is *exposed without authentication*.
@@ -111,6 +115,9 @@ export class DeepProspectBuilder {
   private readonly growjoData?: GrowjoCompany | null;
   private readonly providerCompanies?: ProviderCompanyLike[] | null;
   private readonly resolution?: CompanyResolution | null;
+  private readonly searchProvider?: any;
+  private readonly statePersistence?: any;
+  private readonly skipLiveWebResearch?: boolean;
 
   constructor(options: DeepBuilderOptions = {}) {
     this.fetcher = options.fetcher;
@@ -126,6 +133,9 @@ export class DeepProspectBuilder {
     this.growjoData = options.growjo;
     this.providerCompanies = options.providerCompanies;
     this.resolution = options.resolution;
+    this.searchProvider = options.searchProvider;
+    this.statePersistence = options.statePersistence;
+    this.skipLiveWebResearch = options.skipLiveWebResearch ?? false;
   }
 
   async build(targetUrl: string): Promise<DeepBuilderResult> {
@@ -160,6 +170,105 @@ export class DeepProspectBuilder {
       return this.failProspect(parsed, htmlByUrl, auditTrail, `Discovery failed: ${e?.message || String(e)}`);
     }
     auditTrail.push(`Surface discovered: ${surface.discovered_pages.length} public page(s).`);
+
+    // 1c) DATA COMPLETENESS CHECK (§1) — dataset is a seed, not final truth
+    const providerCompany = (this.providerCompanies?.[0] ?? this.growjoData) as any;
+    const sufficiency = DataSufficiencyChecker.check(providerCompany ?? null, surface);
+    this.onProgress?.('completeness', `Data sufficiency: sufficient=${sufficiency.sufficient}, needs_live_research=${sufficiency.needs_live_research}`);
+    if (sufficiency.reasons.length > 0) {
+      for (const r of sufficiency.reasons) this.onProgress?.('completeness', `  — ${r}`);
+    }
+
+    // Live-web research fallback (§2) — when dataset is incomplete/stale
+    let liveEvidence: Evidence[] = [];
+    let searchQueries: { query: string; results: number; cached: boolean }[] = [];
+    let liveWebResearched = false;
+    let liveWebHtml = new Map<string, string>();
+
+    if (!this.skipLiveWebResearch && sufficiency.needs_live_research) {
+      this.onProgress?.('search', 'Dataset incomplete/stale → triggering live-web research (§2).');
+      liveWebResearched = true;
+
+      const researcher = new LiveWebResearchProvider();
+      try {
+        const result = await researcher.research({
+          context: {
+            company: surface.company,
+            domain: parsed.hostname,
+            personName: providerCompany?.primary_person_name,
+            technicalTopic: technicalAreaFromSurface(surface),
+          },
+          maxStage: 4,
+          maxResultsPerQuery: 8,
+          searchProvider: this.searchProvider,
+          fetcher: this.fetcher as any,
+          onProgress: (stage, msg) => this.onProgress?.(stage as any, msg),
+        });
+
+        // Merge live-web evidence, html, and owner candidates
+        liveEvidence = result.evidence;
+        searchQueries = result.queries_executed;
+        liveWebHtml = result.htmlByUrl;
+
+        // Merge discovered pages from live-web into surface
+        for (const p of result.discovered_pages) {
+          if (!surface.discovered_pages.some(sp => sp.url === p.url)) {
+            surface.discovered_pages.push(p);
+          }
+        }
+
+        if (result.search_available) {
+          this.onProgress?.('search', `Search available via ${result.search_provider}: ${searchQueries.filter(q => !q.cached).length} new query(ies) executed.`);
+        } else {
+          this.onProgress?.('search', 'SEARCH_UNAVAILABLE — continuing with direct public sources only.');
+        }
+
+        if (result.errors.length > 0) {
+          for (const err of result.errors) this.onProgress?.('search', `  [error] ${err}`);
+        }
+
+        auditTrail.push(`Live-web research: ${liveEvidence.length} evidence, ${searchQueries.length} queries, ${result.errors.length} errors.`);
+
+        // Merge live-web owner candidates into people discovery
+        if (result.owner_candidates.length > 0) {
+          this.onProgress?.('people', `Live-web person discovery: ${result.owner_candidates.length} additional candidate(s).`);
+        }
+      } catch (e: any) {
+        auditTrail.push(`Live-web research error: ${e?.message || String(e)}`);
+        this.onProgress?.('search', `Live-web research error: ${e?.message || String(e)}`);
+      }
+    } else if (sufficiency.sufficient) {
+      this.onProgress?.('completeness', 'Dataset sufficient — continuing without live-web research.');
+    } else {
+      this.onProgress?.('completeness', 'Live-web research skipped (disabled by config).');
+    }
+
+    // Merge live-web HTML into the working map
+    for (const [url, html] of liveWebHtml) {
+      if (!htmlByUrl.has(url)) htmlByUrl.set(url, html);
+    }
+
+    // 1d) STATE PERSISTENCE — check for prior state (resume / refresh / changes)
+    let priorChanges: any[] = [];
+    if (this.statePersistence) {
+      this.onProgress?.('sources', `Checking prior research state for ${parsed.hostname}`);
+      try {
+        const prior = this.statePersistence.load(parsed.hostname);
+        if (prior) {
+          // Detect changes vs. prior state
+          priorChanges = ChangeDetector.detect(
+            null, // current not yet built — we'll do a final diff after build
+            prior.state_snapshot
+          );
+          this.onProgress?.('sources', `Found prior state (${prior.last_researched_at}) — ${priorChanges.length} change(s) recorded.`);
+        } else {
+          this.onProgress?.('sources', 'No prior state found (first run for this company).');
+        }
+      } catch (e: any) {
+        this.onProgress?.('sources', `State persistence load error: ${e?.message || String(e)}`);
+        auditTrail.push(`State load error: ${e?.message || String(e)}`);
+      }
+    }
 
     // 1b) BROAD DISCOVERY — robots.txt (sitemap hints), sitemap.xml (URL list),
     // and JSON-LD sameAs (provenance-tracked public links). Bounded + same-origin.
@@ -221,6 +330,9 @@ export class DeepProspectBuilder {
     });
     this.onProgress?.('people', `${people.length} owner candidate(s) discovered (provider-agnostic).`);
     for (const c of people) this.onProgress?.('people', `  [people] ${c.name} — ${c.role}  (${c.confidence})  @ ${c.source_urls[0]}`);
+
+    // Note: live-web research HTML is already merged into htmlByUrl above,
+    // so surface-based person discovery already incorporates live-web pages.
 
     // 5) OWNER RESOLUTION — Growjo people PRIMARY (role match → company
     // identity match → public corroboration → confidence). The HIGH-only gate
@@ -408,12 +520,67 @@ export class DeepProspectBuilder {
       resolution: this.resolution ?? null,
       github_activity: githubRepos,
       activity_timeline: timeline,
+      data_sufficiency: {
+        sufficient: sufficiency.sufficient,
+        needs_live_research: sufficiency.needs_live_research,
+        missing: sufficiency.missing,
+        stale: sufficiency.stale,
+        reasons: sufficiency.reasons,
+      },
+      live_web_evidence: liveEvidence,
+      search_queries: searchQueries,
+      live_web_researched: liveWebResearched,
+      changes: priorChanges,
       artifact_path: '',
       audit_trail: auditTrail,
       case_ref: caseRef
     };
 
     prospect.artifact_path = this.persistArtifact(prospect, parsed.hostname);
+
+    // Final change detection vs. previously stored state (if persistence enabled)
+    if (this.statePersistence && priorChanges.length === 0) {
+      try {
+        const prior = this.statePersistence.load(parsed.hostname);
+        if (prior) {
+          priorChanges = ChangeDetector.detect(prospect, prior.state_snapshot);
+          this.onProgress?.('verification', `${priorChanges.length} change(s) detected vs. prior state.`);
+        }
+      } catch { /* ignore — changes is best-effort */ }
+    }
+
+    // Persist the new state for future resume/refresh/changes
+    if (this.statePersistence) {
+      try {
+        const snap = snapshotFromProspect(prospect);
+        if (snap) {
+          this.statePersistence.save(parsed.hostname, {
+            company: prospect.company,
+            domain: prospect.domain,
+            last_researched_at: new Date().toISOString(),
+            stage_reached: prospect.live_web_researched ? 6 : 3,
+            last_summary: {
+              decision: prospect.decision,
+              finding: prospect.deep_finding?.finding_type || prospect.findings?.finding_type || null,
+              owner: prospect.selected_owner?.name || null,
+              confidence: prospect.confidence,
+              people_count: prospect.people.length,
+              owner_candidates_count: prospect.owner_candidates.length,
+              evidence_count: prospect.evidence.length,
+              sources_count: prospect.public_surface.discovered_pages.length,
+              technical_signals_count: prospect.technical_signals.length,
+            },
+            state_snapshot: snap,
+            search_cache: [],
+            last_error: null,
+          });
+          prospect.changes = priorChanges;
+        }
+      } catch (e: any) {
+        this.onProgress?.('verification', `State persistence error: ${e?.message || String(e)}`);
+      }
+    }
+
     this.onProgress?.('decision', `Deep decision: ${decision} (confidence ${confidence}). Artifact: ${prospect.artifact_path}`);
     return { prospect, case_ref: caseRef };
   }
@@ -436,6 +603,8 @@ export class DeepProspectBuilder {
       recommended_subjects: [], email_draft: email as any, decision: 'NO_GO', confidence: 'LOW',
       growjo_data: this.growjoData ?? null, provider_data: this.providerCompanies ?? null, resolution: this.resolution ?? null,
       github_activity: [], activity_timeline: [],
+      data_sufficiency: { sufficient: false, needs_live_research: false, missing: [], stale: [], reasons: [reason] },
+      live_web_evidence: [], search_queries: [], live_web_researched: false, changes: [],
       artifact_path: '', audit_trail: audit, case_ref: undefined
     };
     prospect.artifact_path = this.persistArtifact(prospect, parsed.hostname);

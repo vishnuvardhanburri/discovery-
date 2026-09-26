@@ -22,6 +22,7 @@ import type {
   OwnerCandidate, CompanySurface, DiscoveredPage, IntelligenceCase,
   SeverityLevel, StrengthLevel, FindingStrength
 } from './IntelligenceCase';
+import type { ChangeRecord } from './ChangeDetector';
 
 // ── Signals ──────────────────────────────────────────────────────────────────
 
@@ -237,14 +238,32 @@ export interface DeepProspect {
   github_activity?: GithubRepoMeta[];
   /** Synthesized activity timeline (findings + evidence + GitHub, provenance-tracked). */
   activity_timeline?: ActivityEvent[];
+  /** Data sufficiency assessment (dataset check + live-web trigger). */
+  data_sufficiency?: {
+    sufficient: boolean;
+    needs_live_research: boolean;
+    missing: string[];
+    stale: string[];
+    reasons: string[];
+  };
+  /** Live-web research results (evidence, search queries, github repos from search). */
+  live_web_evidence?: Evidence[];
+  /** Search queries executed during live-web research (audit trail). */
+  search_queries?: { query: string; results: number; cached: boolean }[];
+  /** Whether live-web research was performed (search + augmentation). */
+  live_web_researched?: boolean;
+  /** Change-detection diff (new/changed/unchanged) vs. previously stored state. */
+  changes?: ChangeRecord[];
 }
 
 // ── Builder I/O ─�────────────────────────────────────────────────────────────
 
 /** Progressive stage events emitted while research runs. */
 export type DeepStage =
-  | 'company' | 'qualification' | 'surface' | 'engineering'
-  | 'signals' | 'people' | 'owners' | 'evidence' | 'findings'
+  | 'company' | 'completeness' | 'search' | 'sources'
+  | 'engineering' | 'deepening' | 'verification'
+  | 'qualification' | 'surface'
+  | 'signals' | 'findings' | 'people' | 'owners' | 'evidence'
   | 'contactability' | 'email' | 'decision';
 
 export interface DeepBuilderOptions {
@@ -269,6 +288,12 @@ export interface DeepBuilderOptions {
   providerCompanies?: ProviderCompanyLike[] | null;
   /** Pre-resolved canonical domain (from DomainResolver); null if not yet resolved. */
   resolution?: CompanyResolution | null;
+  /** Override the search provider (for testing / injectable search). */
+  searchProvider?: any;
+  /** Inject a StatePersistence instance (for resume / refresh / changes). */
+  statePersistence?: any;
+  /** Skip live-web research entirely (use dataset/surface only). */
+  skipLiveWebResearch?: boolean;
 }
 
 /** Minimal interface the builder relies on from the live provider. */
