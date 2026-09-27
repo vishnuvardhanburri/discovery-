@@ -17,26 +17,27 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import type { IntelligenceCase } from './IntelligenceCase';
-import { IntelligenceEngine } from './IntelligenceEngine';
-import { LivePublicObservationProvider } from './LivePublicObservationProvider';
-import { PublicLinkDiscovery } from './PublicLinkDiscovery';
-import { PeopleExtractor } from './PeopleExtractor';
-import { OwnerSelector } from './OwnerSelector';
+import type { IntelligenceCase } from './IntelligenceCase.js';
+import { IntelligenceEngine } from './IntelligenceEngine.js';
+import { LivePublicObservationProvider } from './LivePublicObservationProvider.js';
+import { PublicLinkDiscovery } from './PublicLinkDiscovery.js';
+import { PeopleExtractor } from './PeopleExtractor.js';
+import { OwnerSelector } from './OwnerSelector.js';
+import { ResearchBudget } from './ResearchBudget';
 import type {
   OwnerCandidate, CompanySurface, DiscoveredPage,
   PublicObservationProvider
-} from './IntelligenceCase';
+} from './IntelligenceCase.js';
 import type {
   FindingClassification, EvidenceClaim
-} from './IntelligenceCase';
-import type { Fetcher } from './PublicLinkDiscovery';
-import { DeepProspectBuilder } from './DeepProspectBuilder';
-import { DeepEmailGenerator } from './DeepEmailGenerator';
-import { GrowjoProvider } from './GrowjoProvider';
-import { CompanyQueue } from './CompanyQueue';
-import { DomainResolver } from './DomainResolver';
-import type { DeepProspect, DeepStage, GrowjoCompany, CompanyResolution, QueueState, DeepOwner, DeepFinding } from './DeepTypes';
+} from './IntelligenceCase.js';
+import type { Fetcher } from './PublicLinkDiscovery.js';
+import { DeepProspectBuilder } from './DeepProspectBuilder.js';
+import { DeepEmailGenerator } from './DeepEmailGenerator.js';
+import { GrowjoProvider } from './GrowjoProvider.js';
+import { CompanyQueue } from './CompanyQueue.js';
+import { DomainResolver } from './DomainResolver.js';
+import type { DeepProspect, DeepStage, GrowjoCompany, CompanyResolution, QueueState, DeepOwner, DeepFinding } from './DeepTypes.js';
 
 export interface XaviraOperatorOptions {
   /** Injectable fetcher used by discovery + observation provider. */
@@ -185,7 +186,7 @@ export class XaviraOperator {
     }
 
     let parsed: URL;
-    try { parsed = new URL(urlToUse.startsWith('http') ? urlToUse : `https://${urlToUse}`); }
+    try { parsed = new URL(urlToUse.startsWith('http') ? urlToUse : `https://${urlToUse}.com`); }
     catch { this.println(`Invalid URL: ${urlToUse}`); return null; }
     this.lastTargetUrl = parsed.href;
 
@@ -271,7 +272,7 @@ export class XaviraOperator {
         (stage, message) => this.progress(stage, message, '')
       );
     } catch (e: any) {
-      this.println(`Pipeline error: ${e?.message || String(e)}`);
+      this.println(`Loop error: ${e?.message || String(e)}`);
       return null;
     }
 
@@ -380,11 +381,11 @@ export class XaviraOperator {
     this.println(`Owner:           ${c.technical_owner?.name || '(none)'} [${c.technical_owner?.owner_confidence || 'LOW'}]`);
     this.println(`Owner candidates:${c.owner_candidates?.length || 0}`);
     this.println(`Claim validation:${c.claim_validation}`);
-    if (c.contradictions.length > 0) {
+    if (c.contradictions?.length || 0 > 0) {
       this.println('Contradictions:');
-      c.contradictions.forEach(x => this.println(`  - ${x}`));
+      c.contradictions?.forEach(x => this.println(`  - ${x}`));
     }
-    this.println(`Audit trail:     ${c.audit_trail.length} entries`);
+    this.println(`Audit trail:     ${c.audit_trail?.length || 0} entries`);
   }
 
   cmdShow(args: string): void {
@@ -686,9 +687,9 @@ export class XaviraOperator {
     if (c.prospect_decision !== 'GO') {
       this.println('\n=== EMAIL DRAFT BLOCKED ===');
       this.println(`Decision: ${c.prospect_decision} (email only drafted on GO)`);
-      if (c.contradictions.length > 0) {
+      if (c.contradictions?.length || 0 > 0) {
         this.println('Blocking contradictions:');
-        c.contradictions.forEach(x => this.println(`  - ${x}`));
+        c.contradictions?.forEach(x => this.println(`  - ${x}`));
       }
       if (!c.finding_classification || c.finding_classification.finding_type === 'GENERIC_ENGINEERING_ARTICLE') {
         this.println('Reason: No defensible technical finding (generic engineering content alone is not a finding).');

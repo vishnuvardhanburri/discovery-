@@ -13,12 +13,20 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     delayMs?: number;
   }) {}
   
-  async observePublicSurface(url: string, options?: ObservationOptions): Promise<ObservationResult> {
+  async observePublicSurface(url: string, options?: any): Promise<ObservationResult> {
     const evidenceList: Evidence[] = [];
     let discovery_errors = 0;
     
     const baseUrl = new URL(url);
     const targetOrigin = baseUrl.origin;
+
+    // IDENTITY GUARD: If a requiredOrigin is provided, ensure the starting URL matches it
+    if (options?.requiredOrigin) {
+      if (targetOrigin !== options.requiredOrigin) {
+        console.log(`[IDENTITY_GUARD] Blocked access to external origin: ${targetOrigin}. Required: ${options.requiredOrigin}`);
+        return { evidence: [], discovery_errors: 1 };
+      }
+    }
 
     this.queue.push(url);
     this.queue.push(`${targetOrigin}/robots.txt`);
@@ -42,11 +50,12 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
         const fetcher: HttpFetcher = this.options?.fetcher ?? (async (u, init) => fetch(u, { method: init.method, headers: init.headers, signal: init.signal }));
         response = await fetcher(currentUrl, {
           method: 'GET',
-          headers: options?.headers || { 'User-Agent': 'XAVIRA-Public-Observer/1.0' },
+          headers: options?.headers || { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
           signal: AbortSignal.timeout(options?.timeoutMs || 8000)
         });
       } catch (err: any) {
-        // Do NOT create REAL_PUBLIC_OBSERVATION. Record an error diagnostic instead.
+        // RECORD BLOCKED/FAILED STATE instead of just continuing
+        console.log(`[FETCH_FAILED] ${currentUrl}: ${err.message}`);
         discovery_errors++;
         continue;
       }
@@ -68,7 +77,7 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
         }
       }
 
-      let evidence = this.createEvidence(currentUrl, status, `HTTP ${status} observed`, 1, false, notTested);
+      let evidence = this.createEvidence(currentUrl, status, `HTTP ${status} observed`, 1, false, notTested, text);
       evidence.latency_ms = latency;
       
       const isJson = response.headers.get('content-type')?.includes('application/json');
@@ -143,7 +152,7 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     return Array.from(new Set(fields)).slice(0, limit);
   }
 
-  private createEvidence(url: string, status: number, behavior: string, reps: number, rep: boolean, notTested: string[]): Evidence {
+  private createEvidence(url: string, status: number, behavior: string, reps: number, rep: boolean, notTested: string[], text: string = ''): Evidence {
     return {
       id: 'ev_live_' + randomBytes(8).toString('hex'),
       evidence_origin: 'REAL_PUBLIC_OBSERVATION',
@@ -157,7 +166,8 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       tested_without_auth: true,
       not_tested: notTested,
       retrieved_at: new Date().toISOString(),
-      evidence_text: ''
+      evidence_text: text,
+      raw_observation: text // Ensure we preserve the body content for extractors
     };
   }
 }

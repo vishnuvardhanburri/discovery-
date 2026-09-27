@@ -287,10 +287,9 @@ export class DeepProspectBuilder {
     const industry = inferIndustry(surface, []);
 
     // 3) DEEP SIGNAL DISCOVERY
-    let signals = DeepSignalExtractor.extract(surface.discovered_pages, htmlByUrl, [], {
-      onProgress: (stage, msg) => this.onProgress?.('signals', msg)
-    });
-    this.onProgress?.('signals', `${signals.length} technical signal(s) extracted (documented facts / observations / inferences).`);
+    const signalObs = surface.discovered_pages;
+    let signals = DeepSignalExtractor.extract(signalObs, htmlByUrl, [], { onProgress: (s, m) => this.onProgress?.('signals', m) });
+    this.onProgress?.('signals', `Extracted ${signals.length} technical signals (documented facts / observations / inferences).`);
 
     // Preliminary qualification from surface + signals only
     const prelimCtx = {

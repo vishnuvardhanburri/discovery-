@@ -14,13 +14,70 @@
 import type { HttpFetcher } from './IntelligenceCase';
 import type { SearchResult } from './SearchCache';
 
+export enum SearchFailureReason {
+  SEARCH_BLOCKED = 'SEARCH_BLOCKED', // CAPTCHA, 403, Bot detection
+  SEARCH_UNAVAILABLE = 'SEARCH_UNAVAILABLE', // 5xx, Network timeout
+  SEARCH_EMPTY = 'SEARCH_EMPTY', // 200 OK but no results
+  SEARCH_RATE_LIMITED = 'SEARCH_RATE_LIMITED', // 429
+  SEARCH_PARSE_ERROR = 'SEARCH_PARSE_ERROR' // HTML returned but no results extracted
+}
+
+export class WebSearchProviderManager {
+  private providers: SearchProvider[] = [];
+  private activeProviderIndex = 0;
+
+  constructor(providers: SearchProvider[]) {
+    this.providers = providers;
+  }
+
+  async search(query: string, options: SearchOptions = {}): Promise<SearchProviderResponse> {
+    const tried: string[] = [];
+
+    for (let i = 0; i < this.providers.length; i++) {
+      const provider = this.providers[i];
+      tried.push(provider.name);
+
+      const result = await provider.search(query, options);
+
+      // Success: result found
+      if (result.results && result.results.length > 0) {
+        return { ...result, provider: provider.name };
+      }
+
+      // If it was just EMPTY, we might still want to try others,
+      // but usually EMPTY means EMPTY for that specific query.
+      // However, for resilience, we only fallback on BLOCKED, UNAVAILABLE, or TIMEOUT.
+      const failure = result.failureReason;
+      if (failure !== SearchFailureReason.SEARCH_EMPTY && failure !== SearchFailureReason.SEARCH_PARSE_ERROR) {
+        continue; // Try next provider
+      }
+
+      // If we get a a definitive EMPTY or PARSE_ERROR, we might stop or try others.
+      // For now, we treat EMPTY as a signal to continue if other providers are available.
+    }
+
+    // Return the last failure reason if no results were found
+    const lastResult = await this.providers[this.providers.length - 1].search(query, options);
+    return lastResult;
+  }
+}
+
+export interface SearchProviderResponse {
+  results: SearchResult[];
+  total?: number;
+  provider?: string;
+  error?: string;
+  failureReason?: string;
+  queries?: string[];
+}
+
 export interface SearchProvider {
   /** Human-readable name of this search provider. */
   readonly name: string;
   /** Whether this provider is available (not blocked/disabled). */
   readonly available: boolean;
   /** Execute a search query and return results. */
-  search(query: string, options?: SearchOptions): Promise<SearchResult[]>;
+  search(query: string, options?: SearchOptions): Promise<SearchProviderResponse>;
 }
 
 export interface SearchOptions {
@@ -58,7 +115,7 @@ export class PublicWebSearchProvider implements SearchProvider {
     this.available = true;
   }
 
-  async search(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+  async search(query: string, options: SearchOptions = {}): Promise<SearchProviderResponse> {
     const maxResults = options.maxResults ?? 10;
     const signal = options.signal;
 
@@ -81,15 +138,44 @@ export class PublicWebSearchProvider implements SearchProvider {
         signal: signal ?? AbortSignal.timeout(this.timeoutMs),
       });
 
+      if (res.status === 403 || res.status === 429) {
+        return {
+          results: [],
+          failureReason: res.status === 429 ? SearchFailureReason.SEARCH_RATE_LIMITED : SearchFailureReason.SEARCH_BLOCKED
+        };
+      }
+
       if (!res.ok) {
-        return [];
+        return {
+          results: [],
+          failureReason: SearchFailureReason.SEARCH_UNAVAILABLE
+        };
       }
 
       const html = await res.text();
-      return this.parseResults(html, url, maxResults);
+      const results = this.parseResults(html, url, maxResults);
+
+      if (results.length === 0) {
+        // Heuristic: if the page contains search result markers but regex failed, it's a parse error.
+        const isActuallyEmpty = html.includes('no results found') || html.length < 1000;
+        if (!isActuallyEmpty && html.includes('href=')) {
+          return {
+            results: [],
+            failureReason: SearchFailureReason.SEARCH_PARSE_ERROR
+          };
+        }
+        return {
+          results: [],
+          failureReason: SearchFailureReason.SEARCH_EMPTY
+        };
+      }
+
+      return { results };
     } catch (e) {
-      // Network error, CAPTCHA, rate limit — record unavailable, no pretending
-      return [];
+      return {
+        results: [],
+        failureReason: SearchFailureReason.SEARCH_UNAVAILABLE
+      };
     }
   }
 
@@ -125,10 +211,12 @@ export class NullSearchProvider implements SearchProvider {
   readonly name = 'NullSearchProvider';
   readonly available = false;
 
-  async search(_query: string, _options?: SearchOptions): Promise<SearchResult[]> {
-    return []; // SEARCH_UNAVAILABLE — no results, no pretending
+  async search(_query: string, _options?: SearchOptions): Promise<SearchProviderResponse> {
+    return { results: [], failureReason: SearchFailureReason.SEARCH_UNAVAILABLE };
   }
 }
+
+export { SerperSearchProvider } from './providers/SerperSearchProvider';
 
 export function detectSearchCapabilities(): SearchCapabilities {
   try {

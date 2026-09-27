@@ -67,7 +67,7 @@ async function runTests() {
     if (decision === 'GO' || (injectClaims && result.claim_validation === 'FAILED')) {
       console.log(`Subject:        ${result.subject}`);
     } else {
-      console.log(`Contradictions: ${result.contradictions.join(' | ')}`);
+      console.log(`Contradictions: ${(result.contradictions || []).join(" | ")}`);
     }
     return result;
   };

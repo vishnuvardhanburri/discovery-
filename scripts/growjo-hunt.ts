@@ -28,6 +28,12 @@ import type { CompanyResolution, DeepBuilderResult } from '../src/server/DeepTyp
 import type { ProviderCompanyLike } from '../src/server/DeepTypes';
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
 import { StatePersistence } from '../src/server/StatePersistence';
+import { CompanyQueue } from '../src/server/CompanyQueue';
+import { XaviraSystemManager } from '../src/server/system/XaviraSystemManager';
+import { XaviraDecisionEngine } from '../src/server/XaviraDecisionEngine';
+import { EvidenceLedger } from '../src/server/EvidenceLedger';
+import { XaviraModelGateway, OllamaProvider } from '../src/server/XaviraModelGateway';
+import { detectSearchCapabilities, NullSearchProvider, PublicWebSearchProvider, type SearchProvider } from '../src/server/WebSearchProvider';
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -121,11 +127,20 @@ interface HuntResult {
   prospect?: any;
 }
 
+interface DeepRunOptions {
+  maxDiscoveryPages?: number;
+  discoveryDelayMs?: number;
+  discoveryTimeoutMs?: number;
+  observationDelayMs?: number;
+  skipLiveWebResearch?: boolean;
+}
+
 async function runOne(
   company: CanonicalCompany | null,
   domain: string,
   targetUrl: string,
   providerCompanies: ProviderCompanyLike[],
+  opts?: DeepRunOptions,
 ): Promise<HuntResult> {
   const growjoName = company?.canonical_name || domain;
   const sector = company?.industry || 'unknown';
@@ -142,16 +157,19 @@ async function runOne(
     fetcher: boundedFetch as any,
     saveArtifact,
     artifactsBaseDir: process.cwd(),
-    maxDiscoveryPages: 15,
-    discoveryDelayMs: 40,
-    discoveryTimeoutMs: 6000,
-    observationDelayMs: 40,
+    maxDiscoveryPages: opts?.maxDiscoveryPages ?? 15,
+    discoveryDelayMs: opts?.discoveryDelayMs ?? 40,
+    discoveryTimeoutMs: opts?.discoveryTimeoutMs ?? 6000,
+    observationDelayMs: opts?.observationDelayMs ?? 40,
     onProgress: (stage, msg) => console.log(`  [${stage}] ${msg}`),
     logger: (m) => console.log(`  [discovery] ${m}`),
     growjo: company && company.source === 'GROWJO' ? company as any : null,
     providerCompanies,
     resolution,
     statePersistence,
+    searchProvider: detectSearchCapabilities().available
+      ? new PublicWebSearchProvider({ fetcher: boundedFetch as any }) : new NullSearchProvider(),
+    skipLiveWebResearch: opts?.skipLiveWebResearch ?? false,
   });
 
   const result: HuntResult = {
@@ -335,6 +353,164 @@ async function showOwnerReasoning(targetUrl: string, result: HuntResult, domain:
   }
 }
 
+async function showFindingReasoning(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) {
+    console.log('  (no prospect data — research failed)');
+    return;
+  }
+
+  console.log(`\n── FINDING REASONING — ${p.company} ${domain} ──`);
+  const finding = p.deep_finding;
+  if (!finding) {
+    console.log('  No deep finding.');
+    console.log(`  Decision: ${p.decision} (confidence ${p.confidence})`);
+    return;
+  }
+
+  console.log(`  Finding type:      ${finding.finding_type}`);
+  console.log(`  Confidence:        ${finding.confidence}`);
+  console.log(`  Provenance:        ${finding.provenance}`);
+  console.log(`  Technical area:    ${finding.technical_area}`);
+  if (finding.explanation) console.log(`  Explanation:       ${finding.explanation}`);
+
+  // Decision-engine dimension analysis
+  const ctx = {
+    company: p.company, domain,
+    signals: p.technical_signals || [],
+    evidence: p.evidence || [],
+    finding,
+    findings: p.findings,
+    signals_count: p.technical_signals?.length || 0,
+    evidence_count: p.evidence?.length || 0,
+    sources_count: p.public_surface?.discovered_pages?.length || 0,
+    owner: p.selected_owner || null,
+    contacts: p.contactability || [],
+    previous_state: null,
+  };
+  const decision = XaviraDecisionEngine.decide(ctx as any);
+  console.log(`  Decision engine:   ${decision.outcome} (score ${decision.score}/${decision.max_score})`);
+  console.log(`  Reason:            ${decision.reason}`);
+  if (decision.warnings.length > 0) {
+    console.log(`  Warnings:`);
+    for (const w of decision.warnings) console.log(`    ⚠ ${w}`);
+  }
+  console.log(`  Dimension scores:`);
+  for (const d of decision.dimensions) {
+    console.log(`    ${d.name.padEnd(24)} ${d.score}  — ${d.explanation}`);
+  }
+}
+
+async function showFindings(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) { console.log('  (no prospect data)'); return; }
+  console.log(`\n── FINDINGS — ${p.company} ${domain} ──`);
+  const deep = p.deep_finding;
+  const shallow = p.findings;
+  if (deep) {
+    console.log(`  Deep finding: ${deep.finding_type} (${deep.confidence})`);
+    console.log(`    provenance: ${deep.provenance}`);
+    console.log(`    technical_area: ${deep.technical_area || 'n/a'}`);
+    if (deep.explanation) console.log(`    explanation: ${deep.explanation.slice(0, 200)}`);
+    if (deep.evidence_ids?.length) console.log(`    evidence_ids: ${deep.evidence_ids.join(', ')}`);
+  }
+  if (shallow) {
+    console.log(`  Shallow finding: ${shallow.finding_type} (${shallow.impact_severity})`);
+  }
+  if (!deep && !shallow) console.log('  (no findings)');
+
+  // Decision rationale
+  const decision = result.prospect ? XaviraDecisionEngine.decide({
+    company: p.company, domain,
+    signals: p.technical_signals || [],
+    evidence: p.evidence || [],
+    finding: deep,
+    findings: shallow,
+    signals_count: p.technical_signals?.length || 0,
+    evidence_count: p.evidence?.length || 0,
+    sources_count: p.public_surface?.discovered_pages?.length || 0,
+    owner: p.selected_owner || null,
+    contacts: p.contactability || [],
+    previous_state: null,
+  } as any) : null;
+  if (decision) {
+    console.log(`  Decision: ${decision.outcome} (score ${decision.score}/${decision.max_score})`);
+    console.log(`  Rationale: ${decision.reason}`);
+  }
+}
+
+async function showEvidence(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) { console.log('  (no prospect data)'); return; }
+  console.log(`\n── EVIDENCE LEDGER — ${p.company} ${domain} ──`);
+
+  // Use the EvidenceLedger for traceability
+  const ledger = new EvidenceLedger(path.join(process.cwd(), 'artifacts', 'intelligence', 'evidence'));
+  const companyEvidence = ledger.getCompanyEvidence(domain);
+  if (companyEvidence.evidence.length > 0) {
+    console.log(`  Ledger evidence: ${companyEvidence.evidence.length} record(s)`);
+    for (const e of companyEvidence.evidence.slice(0, 20)) {
+      console.log(`    [${e.evidence_type}/${e.evidence_origin}] ${e.observed_behavior.slice(0, 80)}…`);
+      console.log(`      url: ${e.public_url}`);
+      console.log(`      method: ${e.method} status: ${e.status} retrieved: ${e.retrieved_at}`);
+    }
+    console.log(`  Summary: ${JSON.stringify(companyEvidence.summary, null, 2)}`);
+  } else {
+    console.log('  (no ledger evidence — showing prospect evidence)');
+    for (const e of (p.evidence || []).slice(0, 20)) {
+      console.log(`    [${e.source_type || '?'}] ${e.public_url || e.id}`);
+      console.log(`      ${e.observed_behavior || e.evidence_text || ''}`);
+    }
+  }
+
+  // Backward trace for any findings
+  if (p.deep_finding?.evidence_ids?.length) {
+    console.log(`\n  Trace: finding → evidence → source`);
+    for (const id of p.deep_finding.evidence_ids) {
+      const links = ledger.traceBackward(id);
+      for (const link of links) {
+        console.log(`    ${link.from_id} → ${link.to_id} (${link.relationship}) via evidence [${link.evidence_ids.join(', ')}]`);
+      }
+    }
+  }
+}
+
+async function showSources(targetUrl: string, result: HuntResult, domain: string): Promise<void> {
+  const p = result.prospect;
+  if (!p) { console.log('  (no prospect data)'); return; }
+  console.log(`\n── DISCOVERED SOURCES — ${p.company} ${domain} ──`);
+  const pages = p.public_surface?.discovered_pages || [];
+  for (const pg of pages) {
+    const tier = categorizeTierFromUrl(pg.url);
+    const rel = relateFromUrl(pg.url);
+    console.log(`  Tier ${tier} [${rel}] ${pg.category || '??'}  ${pg.path || pg.url}  (HTTP ${pg.status ?? '?'})`);
+  }
+  if (pages.length === 0) console.log('  (no sources discovered)');
+
+  // Show identity graph relationships
+  if (p.public_surface) {
+    console.log(`\n  Identity graph:`);
+    const pagesAny = pages as any[];
+    const categories = new Set(pagesAny.map((pg: any) => pg.category));
+    for (const cat of categories) {
+      const catPages = pagesAny.filter((pg: any) => pg.category === cat);
+      console.log(`    ${cat} (${catPages.length}): ${catPages.map((pg: any) => pg.path).slice(0, 5).join(', ')}`);
+    }
+  }
+}
+
+function categorizeTierFromUrl(url: string): 1 | 2 | 3 | 4 | 5 | 6 {
+  if (url.includes('/docs') || url.includes('/api') || url.includes('/status') || url.includes('/security')) return 2;
+  if (url.includes('/blog') || url.includes('/careers') || url.includes('/engineering')) return 3;
+  return 1;
+}
+function relateFromUrl(url: string): string {
+  const u = typeof url === 'string' ? url : '';
+  if (u.includes('github.com')) return 'LINKED';
+  if (u.includes('/docs') || u.includes('/api') || u.includes('/status') || u.includes('/security') || u.includes('/blog') || u.includes('/careers')) return 'LINKED';
+  return 'OFFICIAL';
+}
+
 async function main(): Promise<void> {
   const { csv, batch, start, domains, companies: companyNames, research } = parseArgs(process.argv);
 
@@ -432,14 +608,15 @@ async function main(): Promise<void> {
     const targetDomain = subArgs[2];
     if (!aspect || !targetDomain) {
       console.error(`Usage: npx tsx scripts/growjo-hunt.ts ${mode} ${aspect || '<aspect>'} <domain>`);
-      console.error(`  show company <domain>  — full company surface + signals + findings`);
-      console.error(`  show people <domain>   — discovered people + owner candidates`);
-      console.error(`  why owner <domain>     — owner resolution reasoning`);
-      process.exit(1);
-    }
-
-    console.log(`XAVIRA SHOW — ${mode} ${aspect} for ${targetDomain}`);
-    console.log(`Providers: (none — direct domain seed, no Growjo required)`);
+    console.error(`  show company <domain>    — full company surface + signals + findings`);
+    console.error(`  show people <domain>     — discovered people + owner candidates`);
+    console.error(`  show findings <domain>   — all findings with evidence linkage`);
+    console.error(`  show evidence <domain>   — full evidence ledger backward trace`);
+    console.error(`  show sources <domain>    — discovered sources + relationship graph`);
+    console.error(`  why owner <domain>       — owner resolution reasoning`);
+    console.error(`  why finding <domain>     — finding explanation + evidence dimensions`);
+    process.exit(1);
+  }
 
     const target = `https://${targetDomain.replace(/^https?:\/\//, '')}`;
     const result = await runOne(null, targetDomain, target, []);
@@ -448,8 +625,19 @@ async function main(): Promise<void> {
       await showCompany(target, result, targetDomain);
     } else if (aspect === 'people') {
       await showPeople(target, result, targetDomain);
+    } else if (aspect === 'findings') {
+      await showFindings(target, result, targetDomain);
+    } else if (aspect === 'evidence') {
+      await showEvidence(target, result, targetDomain);
+    } else if (aspect === 'sources') {
+      await showSources(target, result, targetDomain);
     } else if (aspect === 'owner' || (mode === 'why' && aspect === 'owner')) {
       await showOwnerReasoning(target, result, targetDomain);
+    } else if (mode === 'why' && aspect === 'finding') {
+      await showFindingReasoning(target, result, targetDomain);
+    } else {
+      console.error(`Unknown aspect: ${aspect}`);
+      process.exit(1);
     }
     return;
   }
@@ -518,11 +706,358 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ── Mode: resume <domain> — resume interrupted research ──
-  if (subcommand === 'resume') {
+  // ── Mode: hunt <domain> — autonomous system-managed research ──
+  if (subcommand === 'hunt') {
     const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
     if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts hunt <domain> [--deep]');
+      console.error('  Autonomous full-stack research via XaviraSystemManager.');
+      console.error('  --deep  enable max-depth research (all tiers, full budget).');
+      process.exit(1);
+    }
+    const deepMode = process.argv.includes('--deep');
+    console.log(`XAVIRA HUNT (system-managed) — researching ${domain}${deepMode ? ' [DEEP MODE]' : ''}`);
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const providerCompanies = company ? [company] : [];
+
+    const modelGateway = new XaviraModelGateway();
+    if (process.env.XAVIRA_OLLAMA_URL || process.env.XAVIRA_OLLAMA_MODEL) {
+      const ollama = new OllamaProvider({});
+      modelGateway.addProvider(ollama);
+    }
+
+    const searchCaps = detectSearchCapabilities();
+    const searchProvider: SearchProvider = searchCaps.available
+      ? new PublicWebSearchProvider({ fetcher: boundedFetch as any })
+      : new NullSearchProvider();
+
+    const mgr = new XaviraSystemManager({
+      fetcher: boundedFetch as any,
+      searchProvider,
+      modelGateway,
+      artifactsDir: process.cwd(),
+      output: { write: (s: string) => console.log(s) },
+    });
+
+    const report = await mgr.researchCompany(company?.canonical_name || domain, domain, providerCompanies);
+
+    console.log(`\n── HUNT REPORT — ${report.company} (${report.domain}) ──`);
+    console.log(`  run id:                ${report.runId}`);
+    console.log(`  state:                 ${report.state}`);
+    console.log(`  phase:                 ${report.phase}`);
+    if (report.triage) {
+      console.log(`  triage:                ${report.triage.decision} — ${report.triage.signals.length} signals, ${report.triage.requests} requests, ${report.triage.timeMs}ms`);
+    }
+    if (report.finding) {
+      console.log(`  finding:               ${report.finding.classification}`);
+      console.log(`    title:    ${report.finding.title || 'n/a'}`);
+      console.log(`    conf:     ${report.finding.confidence}`);
+      console.log(`    evidence: ${report.finding.evidenceIds.length} ID(s)`);
+      console.log(`    expl:     ${report.finding.explanation.slice(0, 120)}`);
+    }
+    console.log(`  evidence count:        ${report.evidenceCount}`);
+    console.log(`  signals count:         ${report.signalCount}`);
+    console.log(`  owner:                 ${report.owner ? `${report.owner.name} (${report.owner.role}, ${report.owner.confidence})` : '(none)'}`);
+    console.log(`  outreach ready:        ${report.outreachReady}`);
+    console.log(`  failures:              ${report.failures.length}`);
+    for (const f of report.failures) console.log(`    ${f.type}: ${f.source} → ${f.strategy}`);
+    console.log(`  next research action:  ${report.nextResearchAction}`);
+    console.log(`  time:                  ${report.timeMs}ms`);
+    console.log(`  audit trail (${report.auditTrail.length} steps):`);
+    for (const step of report.auditTrail) console.log(`    • ${step}`);
+    return;
+  }
+
+  // ── Mode: research <domain> — show current phase and budget ──
+  if (subcommand === 'research') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts research <domain> [--deep]');
+      console.error('  Shows current phase and budget. --deep forces full-depth research.');
+      process.exit(1);
+    }
+    const deepMode = process.argv.includes('--deep');
+    console.log(`XAVIRA RESEARCH — ${domain}${deepMode ? ' [DEEP MODE]' : ''}`);
+
+    const searchCaps = detectSearchCapabilities();
+    const searchProvider: SearchProvider = searchCaps.available
+      ? new PublicWebSearchProvider({ fetcher: boundedFetch as any })
+      : new NullSearchProvider();
+    const modelGateway = new XaviraModelGateway();
+    const ollama = new OllamaProvider({});
+    modelGateway.addProvider(ollama);
+
+    const mgr = new XaviraSystemManager({
+      fetcher: boundedFetch as any,
+      searchProvider,
+      modelGateway,
+      artifactsDir: process.cwd(),
+      output: { write: (s: string) => console.log(s) },
+    });
+
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const report = await mgr.researchCompany(company?.canonical_name || domain, domain, company ? [company] : []);
+
+    console.log(`\n── RESEARCH — ${report.company} (${report.domain}) ──`);
+    console.log(`  phase:                 ${report.phase}`);
+    console.log(`  time:                  ${report.timeMs}ms`);
+    if (report.triage) {
+      console.log(`  triage:                ${report.triage.decision}`);
+      console.log(`    signals: ${report.triage.signals.slice(0, 5).join('; ')}`);
+      console.log(`    http requests: ${report.triage.requests}`);
+      console.log(`    time: ${report.triage.timeMs}ms`);
+    }
+    if (report.finding) {
+      console.log(`  finding:               ${report.finding.classification}`);
+      if (report.finding.title) console.log(`    title:  ${report.finding.title}`);
+      console.log(`    evidence: ${report.finding.evidenceIds.length}`);
+      console.log(`    explanation: ${report.finding.explanation.slice(0, 200)}`);
+    } else {
+      console.log(`  finding:               (none)`);
+    }
+    console.log(`  signal count:          ${report.signalCount}`);
+    console.log(`  evidence count:        ${report.evidenceCount}`);
+    console.log(`  owner:                 ${report.owner ? report.owner.name : '(none)'}`);
+    console.log(`  outreach ready:        ${report.outreachReady}`);
+    console.log(`  next action:           ${report.nextResearchAction}`);
+    return;
+  }
+
+  // ── Mode: show research <domain> — detailed research state ──
+  if (subcommand === 'show' && process.argv.slice(2).filter(a => !a.startsWith('--'))[1] === 'research') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[2];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts show research <domain>');
+      process.exit(1);
+    }
+    const stateDir = path.join(process.cwd(), 'artifacts', 'intelligence');
+    const prospectFile = path.join(stateDir, 'deep', `${domain}.prospect.json`);
+
+    console.log(`\n── RESEARCH STATE — ${domain} ──`);
+    if (fs.existsSync(prospectFile)) {
+      const prospect = JSON.parse(fs.readFileSync(prospectFile, 'utf8'));
+      console.log(`  sources:     ${prospect.public_surface?.discovered_pages?.length || 0}`);
+      console.log(`  evidence:    ${prospect.evidence?.length || 0}`);
+      console.log(`  signals:     ${prospect.technical_signals?.length || 0}`);
+      console.log(`  people:      ${prospect.people?.length || 0}`);
+      console.log(`  owners:      ${prospect.owner_candidates?.length || 0}`);
+      console.log(`  finding:     ${prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE'}`);
+      console.log(`  decision:    ${prospect.decision} (${prospect.confidence})`);
+      console.log(`  data sufficiency: sufficient=${prospect.data_sufficiency?.sufficient || false}`);
+      console.log(`  live web researched: ${prospect.live_web_researched || false}`);
+      console.log(`  live web evidence: ${prospect.live_web_evidence?.length || 0}`);
+      console.log(`  search queries: ${prospect.search_queries?.length || 0}`);
+      if (prospect.search_queries) {
+        for (const q of prospect.search_queries) console.log(`    ${q.cached ? '[cached]' : '[new]'} "${q.query}" → ${q.results} results`);
+      }
+    } else {
+      console.log('  (no stored research state — run "hunt" or "refresh" first)');
+    }
+    return;
+  }
+
+  // ── Mode: deep <domain> — force maximum-depth deep research ──
+  if (subcommand === 'deep') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts deep <domain>');
+      console.error('  Force maximum-depth deep research (full budget, all stages).');
+      process.exit(1);
+    }
+    console.log(`XAVIRA DEEP — maximum-depth research for ${domain}`);
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const providerCompanies = company ? [company] : [];
+    const result = await runOne(
+      company, domain, target, providerCompanies,
+      { maxDiscoveryPages: 35, discoveryDelayMs: 25, skipLiveWebResearch: false },
+    );
+    printSummary([result]);
+    return;
+  }
+
+  // ── Mode: status — show system manager state ──
+  if (subcommand === 'status') {
+    const modelGateway = new XaviraModelGateway();
+    const ollama = new OllamaProvider({});
+    modelGateway.addProvider(ollama);
+    await modelGateway.checkHealth();
+    const searchCaps = detectSearchCapabilities();
+    const statePersistence = new StatePersistence(path.join(process.cwd(), 'artifacts', 'intelligence'));
+    const queuePath = path.join(process.cwd(), 'artifacts', 'intelligence', 'queue.jsonl');
+    let queue: any[] = [];
+    try { queue = new CompanyQueue(queuePath).list(); } catch { /* no queue yet */ }
+    const allDomains = await statePersistence.listAll();
+
+    console.log('\n── XAVIRA SYSTEM STATUS ──');
+    console.log(`  Ollama:                 ${ollama.available ? 'AVAILABLE' : 'not reachable'}`);
+    console.log(`  Search (public):        ${searchCaps ? 'available (DuckDuckGo)' : 'unavailable (NullSearchProvider)'}`);
+    console.log(`  Model gateway:          ${modelGateway.hasAvailableModel ? 'has available model' : 'no model (deterministic only)'}`);
+    console.log(`  Companies in queue:     ${queue.length}`);
+    const byState = queue.reduce((acc: Record<string, number>, r: any) => { acc[r.state] = (acc[r.state] || 0) + 1; return acc; }, {});
+    const breakdown = Object.entries(byState).map(([s, n]) => `${s}=${n}`).join(', ');
+    console.log(`  Queue breakdown:        ${breakdown || '0'}`);
+    console.log(`  Companies with state:   ${allDomains.length}`);
+    for (const d of allDomains.slice(0, 15)) {
+      console.log(`    ${d.domain} — ${d.last_researched_at} — ${d.last_summary?.decision || '?'} / ${d.last_summary?.finding || '?'}`);
+    }
+    if (allDomains.length > 15) console.log(`    ... and ${allDomains.length - 15} more`);
+    return;
+  }
+
+  // ── Mode: pipeline <domain> — show stage-by-stage progress ──
+  if (subcommand === 'pipeline') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts pipeline <domain>');
+      console.error('  Shows the stage-by-stage pipeline progress for a company.');
+      process.exit(1);
+    }
+    const stateDir = path.join(process.cwd(), 'artifacts', 'intelligence');
+    const prospectFile = path.join(stateDir, 'deep', `${domain}.prospect.json`);
+    if (!fs.existsSync(prospectFile)) {
+      console.log(`No stored prospect for ${domain} — run 'hunt' or 'refresh' first.`);
+      process.exit(0);
+    }
+    const prospect = JSON.parse(fs.readFileSync(prospectFile, 'utf8'));
+
+    console.log(`\n── PIPELINE PROGRESS — ${prospect.company} (${domain}) ──`);
+    const stages = [
+      { name: 'company', label: '1. Company' },
+      { name: 'surface', label: '2. Surface Discovery' },
+      { name: 'completeness', label: '3. Data Completeness' },
+      { name: 'search', label: '4. Live-Web Research' },
+      { name: 'engineering', label: '5. Engineering Signals' },
+      { name: 'github', label: '6. GitHub Activity' },
+      { name: 'activity', label: '7. Activity Timeline' },
+      { name: 'signals', label: '8. Signal Engine' },
+      { name: 'findings', label: '9. Finding Engine' },
+      { name: 'verification', label: '10. Safe Verification' },
+      { name: 'people', label: '11. Person Discovery' },
+      { name: 'owners', label: '12. Owner Selection' },
+      { name: 'contacts', label: '13. Contactability' },
+      { name: 'email', label: '14. Email Generation' },
+      { name: 'decision', label: '15. Final Decision' },
+    ];
+
+    const auditTrail = prospect.audit_trail || [];
+    for (const s of stages) {
+      const found = auditTrail.find((a: string) => a.toLowerCase().includes(s.name));
+      const status = found ? '✓' : '○';
+      console.log(`  ${status} ${s.label}`);
+    }
+    console.log(`\n  Final decision: ${prospect.decision} (confidence ${prospect.confidence})`);
+    console.log(`  Finding: ${prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE'}`);
+    console.log(`  Owner: ${prospect.selected_owner?.name || '(none)'}`);
+    return;
+  }
+
+  // ── Mode: draft email <domain> — generate evidence-backed email draft ──
+  if (subcommand === 'draft' && process.argv.slice(2).filter(a => !a.startsWith('--'))[1] === 'email') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[2];
+    if (!domain) {
+      console.error('Usage: npx tsx scripts/growjo-hunt.ts draft email <domain>');
+      process.exit(1);
+    }
+    console.log(`XAVIRA DRAFT EMAIL — ${domain}`);
+    const csvCompanies = csv ? loadCsv(csv).companies : [];
+    const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === domain.toLowerCase()) || null;
+    const target = `https://${domain.replace(/^https?:\/\//, '')}`;
+
+    // Use the SystemManager to get a full report
+    const searchCaps = detectSearchCapabilities();
+    const searchProvider: SearchProvider = searchCaps.available
+      ? new PublicWebSearchProvider({ fetcher: boundedFetch as any })
+      : new NullSearchProvider();
+    const modelGateway = new XaviraModelGateway();
+    const ollama = new OllamaProvider({});
+    modelGateway.addProvider(ollama);
+
+    const mgr = new XaviraSystemManager({
+      fetcher: boundedFetch as any,
+      searchProvider,
+      modelGateway,
+      artifactsDir: process.cwd(),
+      output: { write: (s: string) => console.log(s) },
+    });
+
+    const report = await mgr.researchCompany(company?.canonical_name || domain, domain, company ? [company] : []);
+
+    if (!report.outreachReady || !report.finding) {
+      console.log(`\n  Outreach NOT ready for ${domain}.`);
+      console.log(`  reason: ${report.nextResearchAction}`);
+      console.log(`  finding: ${report.finding?.classification || 'none'}`);
+      console.log(`  owner: ${report.owner ? report.owner.name : '(none)'}`);
+      return;
+    }
+
+    console.log(`\n── DRAFT EMAIL — ${domain} ──`);
+    console.log(`  (based on: ${report.finding.title || report.finding.classification})`);
+    console.log(`  evidence IDs: ${report.finding.evidenceIds.join(', ')}`);
+    console.log('');
+    console.log(`  ─────────────────────────────────────────────────────────`);
+    console.log(`  Subject: Engineering observation at ${company?.canonical_name || domain}`);
+    console.log('');
+    console.log(`  Hi ${report.owner?.name || ''},`);
+    console.log('');
+    if (report.finding) {
+      console.log(`  I noticed ${report.finding.explanation.slice(0, 200)}`);
+      console.log('  This appears to be a genuine technical opportunity for your');
+      console.log('  engineering team. I have specific, evidence-backed suggestions');
+      console.log('  that could help reduce risk or improve outcomes.');
+    }
+    console.log('');
+    console.log(`  All observations are backed by public evidence (${report.finding.evidenceIds.length} source(s)).`);
+    console.log('');
+    console.log(`  Best,`);
+    console.log(`  XAVIRA Outreach`);
+    console.log(`  ─────────────────────────────────────────────────────────`);
+    console.log('');
+    console.log(`  ⚠  This email requires HUMAN APPROVAL before sending.`);
+    console.log(`  Review evidence traceability at: artifacts/intelligence/evidence/`);
+    return;
+  }
+
+  // ── Mode: resume <domain> — resume interrupted research ──
+  // Also supports: resume --batch N  (resume multiple pending companies)
+  if (subcommand === 'resume') {
+    const domain = process.argv.slice(2).filter(a => !a.startsWith('--'))[1];
+    const batchMatch = process.argv.join(' ').match(/--batch\s+(\d+)/);
+    const batchSize = batchMatch ? parseInt(batchMatch[1], 10) : 1;
+
+    if (!domain && process.argv.includes('--batch')) {
+      // Resume all pending companies from the queue
+      const queuePath = path.join(process.cwd(), 'artifacts', 'intelligence', 'queue.jsonl');
+      let queue: any[] = [];
+      try { queue = new CompanyQueue(queuePath).pending(); } catch { /* no queue */ }
+      const toResume = queue.slice(0, batchSize);
+      console.log(`XAVIRA RESUME (batch ${batchSize}) — resuming ${toResume.length} company/companies`);
+      const results: HuntResult[] = [];
+      let i = 0;
+      for (const q of toResume) {
+        i++;
+        try {
+          const target = q.domain.startsWith('http') ? q.domain : `https://${q.domain}`;
+          console.log(`\n[${i}/${toResume.length}] Resuming ${q.company} (${q.domain})...`);
+          const csvCompanies = csv ? loadCsv(csv).companies : [];
+          const company = csvCompanies.find(c => (c.domain || '').toLowerCase() === q.domain.toLowerCase()) || null;
+          results.push(await runOne(company, q.domain, target, company ? [company] : []));
+        } catch (e: any) {
+          console.log(`\n[${i}/${toResume.length}] ${q.company} — FAILED: ${e?.message || String(e)}`);
+          results.push({ company: q.company, domain: q.domain, sector: 'unknown', decision: 'ERROR', confidence: null, finding: '', findingProvenance: '', owner: null, ownerConfidence: null, ownerProvenance: null, people: 0, owner_candidates: 0, growjo_person: false, provider_sources: [], error: e?.message || String(e) });
+        }
+      }
+      printSummary(results);
+      return;
+    }
+
+    if (!domain) {
       console.error('Usage: npx tsx scripts/growjo-hunt.ts resume <domain>');
+      console.error('       npx tsx scripts/growjo-hunt.ts resume --batch N  (resume from queue)');
       process.exit(1);
     }
     console.log(`XAVIRA RESUME — continuing research for ${domain}`);
@@ -554,11 +1089,19 @@ async function main(): Promise<void> {
   console.error('       npx tsx scripts/growjo-hunt.ts --domains "vercel.com,supabase.com"');
   console.error('       npx tsx scripts/growjo-hunt.ts --companies "Vercel,Supabase"');
   console.error('       npx tsx scripts/growjo-hunt.ts --research https://vercel.com');
+  console.error('       npx tsx scripts/growjo-hunt.ts hunt <domain> [--deep]');
+  console.error('       npx tsx scripts/growjo-hunt.ts research <domain> [--deep]');
+  console.error('       npx tsx scripts/growjo-hunt.ts deep <domain>');
   console.error('       npx tsx scripts/growjo-hunt.ts refresh <domain>');
   console.error('       npx tsx scripts/growjo-hunt.ts refresh --all [--csv <csv>]');
-  console.error('       npx tsx scripts/growjo-hunt.ts changes <domain>');
   console.error('       npx tsx scripts/growjo-hunt.ts resume <domain>');
-  console.error('Options: --batch N  --start K');
+  console.error('       npx tsx scripts/growjo-hunt.ts changes <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts status');
+  console.error('       npx tsx scripts/growjo-hunt.ts pipeline <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts show company|people|findings|evidence|sources|research <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts why owner|finding <domain>');
+  console.error('       npx tsx scripts/growjo-hunt.ts draft email <domain>');
+  console.error('Options: --batch N  --start K  --csv <csv>');
   process.exit(1);
 }
 

@@ -12,7 +12,7 @@
  */
 
 import type { DeepSignal, SignalSourceType, EvidenceProvenance, SignalStrength, DeepStage } from './DeepTypes';
-import type { Evidence, DiscoveredPage, CompanySurface } from './IntelligenceCase';
+import type { Evidence, DiscoveredPage, CompanySurface, SourceRelationship } from './IntelligenceCase';
 
 type SignalDetector = {
   type: SignalSourceType;
@@ -125,18 +125,29 @@ export interface SignalExtractorOptions {
   onProgress?: (stage: DeepStage, message: string) => void;
 }
 
+export interface SignalCandidate {
+  id: string;
+  type: SignalSourceType;
+  source_url: string;
+  raw_match: string;
+  initial_strength: SignalStrength;
+  evidence_ids: string[];
+  qualification_gaps: string[];
+  provenance: EvidenceProvenance;
+  category: string | undefined;
+}
+
 export class DeepSignalExtractor {
   /**
-   * Build structured signals from the bounded public surface HTML plus any
-   * observation evidence the engine produced (signals may link to evidence ids).
+   * Build structured signal candidates from a set of observations.
+   * Stage 1: Evidence -> SignalCandidate
    */
-  static extract(
-    pages: DiscoveredPage[],
-    htmlByUrl: Map<string, string>,
+  static extractCandidates(
+    observations: any[],
     observationEvidence: Evidence[] = [],
-    options: SignalExtractorOptions = {}
-  ): DeepSignal[] {
-    const signals: DeepSignal[] = [];
+    options: { onCandidate: (cand: SignalCandidate | null, obs: any, mapping: SignalSourceType | null) => void } = { onCandidate: () => {} }
+  ): SignalCandidate[] {
+    const candidates: SignalCandidate[] = [];
     const evidenceByUrl = new Map<string, Evidence[]>();
     for (const ev of observationEvidence) {
       if (!ev.public_url) continue;
@@ -146,45 +157,222 @@ export class DeepSignalExtractor {
       evidenceByUrl.set(k, arr);
     }
 
-    for (const page of pages) {
-      const key = page.url.replace(/\/$/, '') || page.url;
-      const html = htmlByUrl.get(page.url) || htmlByUrl.get(key);
-      if (!html) continue; // signals only from pages we actually fetched
-      const text = textOf(html);
-      const titleMatch = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
-      const title = titleMatch ? titleMatch[1].trim() : undefined;
-      const pub = publishedAt(html);
-      const isStatus = page.category === 'status_ops';
+    for (const obs of observations) {
+      const mapped = this.mapObservationToSignalType(obs.type, obs.raw_text || obs.text || '');
 
-      const seen = new Set<SignalSourceType>();
-      for (const det of DETECTORS) {
-        const m = det.regex.exec(text);
-        if (!m) continue;
-        if (seen.has(det.type)) continue;
-        seen.add(det.type);
+      // PHASE 2: TRACE ACTUAL OBSERVATION
+      console.log(`\n[OBSERVATION_TRACE]`);
+      console.log(`company=${obs.company || 'UNKNOWN'}`);
+      console.log(`source_url=${obs.url || 'UNKNOWN'}`);
+      console.log(`observation_type=${obs.type}`);
+      console.log(`observation_text="${(obs.raw_text || obs.text || '').slice(0, 500)}..."`);
 
-        const provenance: EvidenceProvenance = det.provenance(page.category, isStatus);
-        const strength: SignalStrength = det.strength(page.category);
-        const excerpt = sentenceAround(text, m[0]);
-        const related = (evidenceByUrl.get(key) || []).filter(e => e.public_url === page.url).map(e => e.id);
+      if (!mapped) {
+        console.log(`[MAPPING_FAILURE] No signal type mapping for obs_type: ${obs.type}`);
+        options.onCandidate(null, obs, null);
+        continue;
+      }
 
-        signals.push({
-          signal_id: `sig_${det.type}_${hash(page.url)}`,
-          type: det.type,
-          source_url: page.url,
-          source_title: title,
-          published_at: pub,
-          excerpt,
-          provenance,
-          signal_strength: strength,
-          relevance: det.relevance,
-          related_evidence_ids: related.length ? related : undefined
-        });
+      const signalType = mapped.type;
+      const detector = mapped.detector;
+
+      console.log(`[MAPPING_SUCCESS] ${obs.type} -> ${signalType}`);
+
+      const relatedEvidence = evidenceByUrl.get(obs.url || '') || [];
+
+      // IDENTITY GUARD: Filter out unverified evidence (Quarantine)
+      // Only quarantine when there IS evidence but it's all unverified.
+      // When no evidence exists, the observation itself is the evidence.
+      const verifiedEvidence = relatedEvidence.filter(e => e.relationship_type !== 'UNVERIFIED');
+      if (relatedEvidence.length > 0 && verifiedEvidence.length === 0) {
+        console.log(`[QUARANTINE] Skipping signal extraction for unverified source: ${obs.url}`);
+        options.onCandidate(null, obs, signalType);
+        continue;
+      }
+
+      const relatedIds = verifiedEvidence.map(e => e.id);
+
+      // Initial strength based on evidence strength, or default based on detector
+      let strength: SignalStrength = 'LOW';
+      if (verifiedEvidence.length > 0) {
+        if (verifiedEvidence.some(e => e.strength === 'CRITICAL')) strength = 'HIGH';
+        else if (verifiedEvidence.some(e => e.strength === 'HIGH')) strength = 'MEDIUM';
+        else if (verifiedEvidence.some(e => e.strength === 'MEDIUM')) strength = 'LOW';
+      } else if (detector) {
+        strength = detector.strength(obs.category);
+      }
+
+      // Provenance from detector, or default
+      const provenance = detector ? detector.provenance(obs.category, false) : 'REAL_PUBLIC_OBSERVATION';
+
+      const candidate: SignalCandidate = {
+        id: `cand_${signalType}_${hash(obs.url || Math.random().toString())}`,
+        type: signalType,
+        source_url: obs.url || 'unknown',
+        raw_match: obs.raw_text || obs.text || '',
+        initial_strength: strength,
+        evidence_ids: relatedIds,
+        qualification_gaps: [],
+        provenance: provenance as any,
+        category: obs.category,
+      };
+
+      console.log(`[CANDIDATE_CREATED] ID: ${candidate.id} | Type: ${candidate.type} | Strength: ${candidate.initial_strength}`);
+      candidates.push(candidate);
+      options.onCandidate(candidate, obs, signalType);
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Promote candidates to qualified signals.
+   * Stage 2: SignalCandidate -> QualifiedSignal (DeepSignal)
+   */
+  static qualify(
+    candidates: SignalCandidate[],
+    observationEvidence: Evidence[],
+    options: { onQualification: (res: 'QUALIFIED' | 'REJECTED') => void } = { onQualification: () => {} }
+  ): DeepSignal[] {
+    const qualified: DeepSignal[] = [];
+
+    for (const cand of candidates) {
+      const evidence = observationEvidence.filter(e => cand.evidence_ids.includes(e.id));
+
+      // QUALIFICATION RULES
+      // 1. Must have evidence OR be from a direct HTML observation (no evidence required)
+      if (evidence.length === 0 && cand.evidence_ids.length > 0) {
+        // Candidates with evidence IDs but no matching evidence — quarantine
+        console.log(`[QUALIFICATION_REJECTED] ${cand.id} | Reason: MISSING_PROVENANCE`);
+        cand.qualification_gaps.push('MISSING_PROVENANCE');
+        options.onQualification('REJECTED');
+        continue;
+      }
+
+      // 2. Source strength check — only applies when evidence exists
+      if (evidence.length > 0) {
+        const hasHighStrength = evidence.some(e => e.strength === 'HIGH' || e.strength === 'CRITICAL');
+        const hasMediumStrength = evidence.some(e => e.strength === 'MEDIUM');
+        const hasMultipleSources = new Set(evidence.map(e => e.source_type)).size >= 2;
+
+        if (!hasHighStrength && !hasMediumStrength && !hasMultipleSources) {
+          console.log(`[QUALIFICATION_REJECTED] ${cand.id} | Reason: INSUFFICIENT_STRENGTH_OR_CORROBORATION`);
+          cand.qualification_gaps.push('INSUFFICIENT_STRENGTH_OR_CORROBORATION');
+          options.onQualification('REJECTED');
+          continue;
+        }
+      }
+
+      // Promote to DeepSignal
+      console.log(`[QUALIFICATION_SUCCESS] ${cand.id} | Type: ${cand.type}`);
+      qualified.push({
+        signal_id: `sig_${cand.id}`,
+        type: cand.type,
+        source_url: cand.source_url,
+        excerpt: cand.raw_match,
+        provenance: cand.provenance as any,
+        signal_strength: cand.initial_strength,
+        relevance: `Qualified signal of type ${cand.type} based on verified evidence.`,
+        related_evidence_ids: cand.evidence_ids
+      });
+      options.onQualification('QUALIFIED');
+    }
+
+    return qualified;
+  }
+
+  private static mapObservationToSignalType(obsType: string, text: string = ''): { type: SignalSourceType; detector: SignalDetector | null } | null {
+    const mapping: Record<string, SignalSourceType> = {
+      'incident': 'PUBLIC_INCIDENT',
+      'system_health': 'STATUS_PAGE',
+      'SRE_hiring': 'TECHNICAL_HIRING',
+      'tech_stack_requirement': 'ARCHITECTURE_DISCUSSION',
+      'ARCHITECTURE_SHIFT': 'ARCHITECTURE_DISCUSSION',
+      'SCALING_PAIN': 'ARCHITECTURE_DISCUSSION',
+      'RELIABILITY_HINT': 'PUBLIC_INCIDENT',
+      'INFRA_LIMITATION': 'ARCHITECTURE_DISCUSSION',
+    };
+
+    if (mapping[obsType]) {
+      const detector = DETECTORS.find(d => d.type === mapping[obsType]) || null;
+      return { type: mapping[obsType], detector };
+    }
+
+    for (const detector of DETECTORS) {
+      if (detector.regex.test(text)) return { type: detector.type, detector };
+    }
+
+    return null;
+  }
+
+  static extract(
+    observations: any[],
+    observationEvidence: Evidence[] | Map<string, string> = [],
+    existingEvidence: Evidence[] = [],
+    opts: { onProgress?: (stage: string, msg: string) => void } = {}
+  ): DeepSignal[] {
+    console.log(`\n[PROMOTION_FORENSICS] Starting promotion chain for ${observations.length} observations...`);
+
+    // If the second arg is a Map (htmlByUrl), extract text from HTML and build observations
+    let obsList: any[] = observations;
+    if (observationEvidence instanceof Map) {
+      obsList = [];
+      for (const obs of observations) {
+        const html = observationEvidence.get(obs.url);
+        if (html) {
+          const text = textOf(html);
+          for (const detector of DETECTORS) {
+            const m = detector.regex.exec(text);
+            if (m) {
+              obsList.push({
+                url: obs.url,
+                type: detector.type,
+                raw_text: sentenceAround(text, m[0]),
+                source_url: obs.url,
+                category: obs.category,
+              });
+            }
+          }
+        }
       }
     }
 
-    options.onProgress?.('signals', `Extracted ${signals.length} technical signal(s) from public surface.`);
-    return signals;
+    const evidenceArr = Array.isArray(observationEvidence) ? observationEvidence : [];
+    evidenceArr.push(...existingEvidence);
+
+    let observations_received = 0;
+    let signal_mapping_success = 0;
+    let candidates_created = 0;
+    let candidates_rejected = 0;
+    let candidates_qualified = 0;
+    let signals_stored = 0;
+
+    const candidates = this.extractCandidates(obsList, evidenceArr, {
+      onCandidate: (cand, obs, mapping) => {
+        observations_received++;
+        if (mapping) signal_mapping_success++;
+        if (cand) candidates_created++;
+      }
+    });
+
+    const qualified = this.qualify(candidates, evidenceArr, {
+      onQualification: (res) => {
+        if (res === 'REJECTED') candidates_rejected++;
+        else if (res === 'QUALIFIED') candidates_qualified++;
+      }
+    });
+
+    signals_stored = qualified.length;
+
+    console.log(`\n[PROMOTION_SUMMARY]`);
+    console.log(`observations_received: ${observations_received}`);
+    console.log(`signal_mapping_success: ${signal_mapping_success}`);
+    console.log(`signal_candidates_created: ${candidates_created}`);
+    console.log(`candidates_rejected: ${candidates_rejected}`);
+    console.log(`candidates_qualified: ${candidates_qualified}`);
+    console.log(`signals_stored: ${signals_stored}`);
+
+    return qualified;
   }
 
   static splitByProvenance(signals: DeepSignal[]): {

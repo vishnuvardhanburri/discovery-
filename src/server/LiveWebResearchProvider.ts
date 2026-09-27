@@ -165,7 +165,8 @@ export class LiveWebResearchProvider {
         } else {
           onProgress('search', `[search] ${q.query}`);
           try {
-            const results = await searchProvider.search(q.query, { maxResults: maxResultsPerQuery } as SearchOptions);
+            const resp = await searchProvider.search(q.query, { maxResults: maxResultsPerQuery } as SearchOptions);
+            const results = resp.results || [];
             this.cache.set(q.query, results);
             queriesExecuted.push({ query: q.query, results: results.length, cached: false });
             this.collectSearchEvidence(results, evidence, discoveredPages, htmlByUrl, ownerCandidates, q.category, errors);
@@ -223,7 +224,7 @@ export class LiveWebResearchProvider {
             signal: AbortSignal.timeout(6000),
           });
           const latency = 0; // simplified
-          ev.reproductions++;
+          if (ev.reproductions !== null) ev.reproductions++;
           ev.repeatable = ev.repeatable && res.status === ev.status;
           ev.latency_samples = [...(ev.latency_samples || []), latency];
           onProgress('verification', `re-verified ${ev.public_url} → HTTP ${res.status}`);
@@ -292,7 +293,7 @@ export class LiveWebResearchProvider {
       errors,
       search_available: searchAvailable,
       search_provider: searchProvider!.name,
-      stage_reached: this.budget.currentStageNum,
+      stage_reached: this.budget.getCurrentStageNum(),
     };
   }
 

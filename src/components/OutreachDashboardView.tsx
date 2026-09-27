@@ -57,7 +57,7 @@ interface LiveFeedMetrics {
 }
 
 interface OutreachDashboardViewProps {
-  onBackToHome: () => void;
+  onBackToHome?: () => void;
 }
 
 interface TargetOutreachState {
@@ -1050,14 +1050,14 @@ export const OutreachDashboardView: React.FC<OutreachDashboardViewProps> = ({ on
 
                   {/* 5 Distinct Gate Checks */}
                   <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-[10px]">
-                    <div className={`p-2 rounded border ${currentOutreachPackage.sendSafetyStatus.isSourceVerified ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300' : 'bg-red-950/40 border-red-500/30 text-red-300'}`}>
+                    <div className={`p-2 rounded border ${currentOutreachPackage.sendSafetyStatus.isIdentityVerified ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300' : 'bg-red-950/40 border-red-500/30 text-red-300'}`}>
                       <span className="block font-bold">1. SOURCE:</span>
-                      <span>{currentOutreachPackage.sendSafetyStatus.isSourceVerified ? 'VERIFIED ✓' : 'UNVERIFIED ✕'}</span>
+                      <span>{currentOutreachPackage.sendSafetyStatus.isIdentityVerified ? 'VERIFIED ✓' : 'UNVERIFIED ✕'}</span>
                     </div>
 
-                    <div className={`p-2 rounded border ${currentOutreachPackage.sendSafetyStatus.isDateVerified ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300' : 'bg-red-950/40 border-red-500/30 text-red-300'}`}>
+                    <div className={`p-2 rounded border ${currentOutreachPackage.sendSafetyStatus.isClaimConfidenceValid ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300' : 'bg-red-950/40 border-red-500/30 text-red-300'}`}>
                       <span className="block font-bold">2. FRESHNESS:</span>
-                      <span>{currentOutreachPackage.sendSafetyStatus.isDateVerified ? `${currentSignal.signalAgeDays}D AGO ✓` : 'STALE >90D ✕'}</span>
+                      <span>{currentOutreachPackage.sendSafetyStatus.isClaimConfidenceValid ? `${currentSignal.signalAgeDays}D AGO ✓` : 'STALE >90D ✕'}</span>
                     </div>
 
                     <div className={`p-2 rounded border ${currentOutreachPackage.sendSafetyStatus.isIdentityVerified ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300' : 'bg-red-950/40 border-red-500/30 text-red-300'}`}>
@@ -1163,7 +1163,7 @@ export const OutreachDashboardView: React.FC<OutreachDashboardViewProps> = ({ on
                       <span className="font-bold text-white uppercase">FOLLOW-UP #1 DRAFT (NO FAKE TELEMETRY)</span>
                     </div>
                     <span className="text-[10px] text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded">
-                      STRUCTURE: {currentOutreachPackage.structureType}
+                      STRUCTURE: {currentOutreachPackage.selectedSubject ? 'SIGNAL_BASED' : 'VARIATION_BASED'}
                     </span>
                   </div>
 

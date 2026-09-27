@@ -646,7 +646,7 @@ async function main() {
     const state = {
       company: 'TestCo', domain: 'testco.com', last_researched_at: new Date().toISOString(),
       stage_reached: 2, last_error: null,
-      state_snapshot: { company: 'TestCo', domain: 'testco.com', sources: new Set(), signals: [], findings: [], owners: [], people: [], contacts: [], activities: [], evidence_ids: [], retrieved_at: new Date().toISOString() },
+      state_snapshot: { company: 'TestCo', domain: 'testco.com', sources: new Set<string>(), signals: [], findings: [], owners: [], people: [], contacts: [], activities: [], evidence_ids: [], retrieved_at: new Date().toISOString() },
       search_cache: [],
     };
     sp.save('testco.com', state);

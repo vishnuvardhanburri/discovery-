@@ -190,8 +190,8 @@ export class IntelligenceEngine {
         return { type: 'OBSERVED_LATENCY', severity: 'MEDIUM', basis: `Latency measured at ${ev.latency_ms}ms against baseline ${ev.baseline_latency_ms}ms.` };
       }
       if (ev.status && ev.status >= 500) {
-        if (ev.repeatable && ev.reproductions >= 2) {
-          return { type: 'REPEATED_ERRORS', severity: 'MEDIUM', basis: `Repeated HTTP ${ev.status} across ${ev.reproductions} attempts.` };
+        if (ev.repeatable === true && (ev.reproductions || 0) >= 2) {
+          return { type: 'REPEATED_ERRORS', severity: 'MEDIUM', basis: `Repeated HTTP ${ev.status} across ${ev.reproductions || 0} attempts.` };
         } else {
           return { type: 'UNEXPECTED_PUBLIC_BEHAVIOR', severity: 'LOW', basis: `Single unexpected HTTP ${ev.status} response.` };
         }
@@ -344,7 +344,7 @@ export class IntelligenceEngine {
     let techStr: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
 
     const hasApi = resolvedEvidence.some(e => e.source_type === 'API_ENDPOINT');
-    const totalReps = resolvedEvidence.reduce((acc, curr) => acc + curr.reproductions, 0);
+    const totalReps = resolvedEvidence.reduce((acc, curr) => acc + (curr.reproductions || 0), 0);
     const allRepeatable = resolvedEvidence.every(e => e.repeatable !== false);
 
     if (hasApi) {
@@ -461,7 +461,7 @@ export class IntelligenceEngine {
     if (isApi) {
       claims.push({ text: `While checking the publicly accessible surface at:\n${urls.join('\n')}\n\nI observed that:\n${thesis.xavira_observation}`, evidence_ids: allIds, claim_type: 'OBSERVATION' });
       
-      const totalReps = resolvedEvidence.reduce((acc, curr) => acc + curr.reproductions, 0);
+      const totalReps = resolvedEvidence.reduce((acc, curr) => acc + (curr.reproductions || 0), 0);
       const allRepeatable = resolvedEvidence.every(e => e.repeatable);
       const uniqueNotTested = Array.from(new Set(resolvedEvidence.flatMap(e => e.not_tested)));
       const notTestedStr = uniqueNotTested.length > 0 ? uniqueNotTested.join(', ') : 'attempt further exploitation';
@@ -529,7 +529,7 @@ export class IntelligenceEngine {
 
       if (claim.claim_type === 'REPRODUCTION') {
         if (text.includes('repeatable') || text.includes('reproduced')) {
-          if (!resolvedEvidence.some(e => e.repeatable && e.reproductions >= 2)) return 'FAILED';
+          if (!resolvedEvidence.some(e => e.repeatable === true && (e.reproductions || 0) >= 2)) return 'FAILED';
         }
         if (text.includes('publicly documented') && !resolvedEvidence.every(e => e.evidence_origin === 'DOCUMENTED_SOURCE')) return 'FAILED';
       }

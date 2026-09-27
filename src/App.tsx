@@ -32,7 +32,7 @@ export default function App() {
     <ErrorBoundary>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<OutreachDashboardView />} />
+          <Route path="/" element={<OutreachDashboardView onBackToHome={() => {}} />} />
         </Routes>
       </BrowserRouter>
     </ErrorBoundary>

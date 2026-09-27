@@ -419,8 +419,8 @@ async function main() {
     for (const term of unsupported) assert(!body.includes(term), `no fabricated term "${term}" in email`);
     // evidence lineage: resolved -> raw ; email claims -> evidence
     const rawIds = new Set(prospect.evidence.map(e => e.id));
-    for (const id of case_ref!.resolved_evidence.map(e => e.id)) assert(rawIds.has(id), `resolved evidence ${id} traces to raw`);
-    for (const cl of prospect.email_draft.claims) for (const id of cl.evidence_ids) assert(rawIds.has(id), `email claim evidence_id ${id} traces to evidence`);
+    for (const id of (case_ref!.resolved_evidence || []).map(e => e.id)) assert(rawIds.has(id), `resolved evidence ${id} traces to raw`);
+    for (const cl of prospect.email_draft?.claims || []) for (const id of cl.evidence_ids) assert(rawIds.has(id), `email claim evidence_id ${id} traces to evidence`);
     // artifact persisted
     assert(fs.existsSync(prospect.artifact_path), 'deep artifact persisted to disk');
     const persisted = JSON.parse(fs.readFileSync(prospect.artifact_path, 'utf8')) as DeepProspect;

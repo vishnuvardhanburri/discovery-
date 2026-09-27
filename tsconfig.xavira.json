@@ -64,6 +64,26 @@
     "src/server/ChangeDetector.ts",
     "src/server/SearchCache.ts",
     "src/server/ResearchBudget.ts",
-    "src/server/StatePersistence.ts"
+    "src/server/StatePersistence.ts",
+    "src/server/XaviraSystemManager.ts",
+    "src/server/XaviraDecisionEngine.ts",
+    "src/server/XaviraModelGateway.ts",
+    "src/server/SourceDiscoveryOrchestrator.ts",
+    "src/server/EvidenceLedger.ts",
+    "src/server/research/ResearchBudget.ts",
+    "src/server/research/TriageEngine.ts",
+    "src/server/research/HypothesisEngine.ts",
+    "src/server/research/ResearchActionSelector.ts",
+    "src/server/research/XaviraResearchController.ts",
+    "src/server/findings/XaviraNoiseFilter.ts",
+    "src/server/findings/OpportunityDetector.ts",
+    "src/server/findings/FindingEvaluator.ts",
+    "src/server/findings/FindingGraph.ts",
+    "src/server/findings/FindingQA.ts",
+    "src/server/signals/SignalCorrelationEngine.ts",
+    "src/server/freshness/ChangeDetector.ts",
+    "src/server/system/XaviraSystemManager.ts",
+    "tests/researchController.test.ts",
+    "tests/findingEvaluator.test.ts"
   ]
 }

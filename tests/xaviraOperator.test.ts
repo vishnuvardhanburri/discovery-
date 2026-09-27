@@ -329,7 +329,7 @@ async function main() {
     assert(owner.owner_confidence === 'HIGH', `owner confidence HIGH (got ${owner.owner_confidence})`);
     assert(owner.name === 'Jane Doe', 'owner name preserved');
     // every email claim's evidence_ids must reference a real resolved evidence id
-    const resolvedIds = new Set(result.resolved_evidence.map(e => e.id));
+    const resolvedIds = new Set((result.resolved_evidence || []).map(e => e.id));
     for (const claim of result.email_model!.claims) {
       if (claim.evidence_ids.length > 0) {
         for (const id of claim.evidence_ids) {
@@ -339,7 +339,7 @@ async function main() {
     }
     // resolved evidence ids trace to raw evidence ids
     const rawIds = new Set(result.evidence.map(e => e.id));
-    for (const id of result.resolved_evidence.map(e => e.id)) {
+    for (const id of (result.resolved_evidence || []).map(e => e.id)) {
       assert(rawIds.has(id), `resolved evidence id ${id} traces to raw evidence`);
     }
   });
