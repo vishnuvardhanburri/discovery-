@@ -551,6 +551,30 @@ export interface OutreachPackage {
   next_action: 'HUMAN_REVIEW' | 'BLOCKED';
 }
 
+export type ContactStatus =
+  | 'VERIFIED_EMAIL'
+  | 'PUBLIC_BUSINESS_CONTACT'
+  | 'LICENSED_PROVIDER_CONTACT'
+  | 'UNVERIFIED_POSSIBLE_EMAIL'
+  | 'NO_VERIFIED_CONTACT';
+
+export interface ManualOutreachCard {
+  company: string;
+  person: string;
+  role: string;
+  contact: string;
+  contactStatus: ContactStatus;
+  whyThisPerson: string;
+  finding: string;
+  primarySource: string;
+  subject: string;
+  email: string;
+  backupSubject: string;
+  backupEmail: string;
+  replyEvidencePack: string;
+  confidence: DeepConfidence;
+}
+
 export type QueueState =
   | 'QUEUED' | 'RESOLVING' | 'RESEARCHING' | 'RESEARCH_MORE'
   | 'NO_GO' | 'OUTREACH_READY' | 'CONTACT_READY' | 'APPROVED' | 'SENT';

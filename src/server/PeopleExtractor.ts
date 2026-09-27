@@ -424,6 +424,10 @@ export class PeopleExtractor {
     return { verified: cooccur, onPeoplePage };
   }
 
+  static cleanName(name: string): string {
+    return name.trim().replace(/\s+/g, ' ');
+  }
+
   static dedupe(candidates: any[]): any[] {
     const best = new Map<string, any>();
     const rank = { LOW: 0, MEDIUM: 1, HIGH: 2, NOT_APPLICABLE: 0 };
@@ -435,5 +439,14 @@ export class PeopleExtractor {
       }
     }
     return Array.from(best.values());
+  }
+
+  static relationshipToArea(role: string, hints: string[] = []): string {
+    if (!hints.length) return 'General Engineering';
+    const roleLower = role.toLowerCase();
+    for (const hint of hints) {
+      if (roleLower.includes(hint.toLowerCase())) return `Specialist: ${hint}`;
+    }
+    return 'Adjacent Engineering';
   }
 }

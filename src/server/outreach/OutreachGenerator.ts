@@ -24,10 +24,11 @@ export class OutreachGenerator {
   ): Promise<DeepEmailDraft> {
     const { selected_owner, company, deep_finding } = prospect;
 
-    const prompt = `You are a technical researcher writing to another engineer.
+    const prompt = (variant: 'primary' | 'backup') => `You are a technical researcher writing to another engineer.
     Target: ${selected_owner?.name} (${selected_owner?.role}) at ${company}.
     Finding: ${deep_finding?.explanation}
     Strategy: ${strategy.type} - ${strategy.angle}
+    Variant: ${variant === 'primary' ? 'Full high-precision outreach' : 'Short, low-friction backup variant'}
 
     Constraints:
     - Tone: Engineer-to-Engineer. Clinical, evidence-based, no hype.
@@ -35,7 +36,7 @@ export class OutreachGenerator {
     - No fake personalization ("followed your journey").
     - No meeting requests.
     - No sales pitches.
-    - Maximum 140 words.
+    - Maximum ${variant === 'primary' ? '140' : '70'} words.
 
     Structure:
     1. Subject: Technical and natural.
@@ -52,43 +53,56 @@ export class OutreachGenerator {
 
     Output JSON: { "subject": "...", "alternate_subject": "...", "body": "...", "claims": [{ "text": "...", "evidence_id": "..." }] }`;
 
-    const response = await this.modelGateway.generate({
-      prompt,
-      capability: 'outreach_generation',
-      temperature: 0.4
-    });
+    const generateVariant = async (variant: 'primary' | 'backup') => {
+      const response = await this.modelGateway.generate({
+        prompt: prompt(variant),
+        capability: 'outreach_generation',
+        temperature: 0.4
+      });
 
-    try {
-      const data = JSON.parse(response.text);
-
-      // Map generated claims into the ledger
-      if (data.claims) {
-        data.claims.forEach((c: any, i: number) => {
-          ledger.addClaim({
-            claim_id: `claim_${i}`,
-            text: c.text,
-            type: 'XAVIRA_OBSERVATION',
-            supporting_evidence_ids: [c.evidence_id],
-            supporting_signal_ids: [],
-            supporting_correlation_ids: [],
-            confidence: 0.8,
-            allowed_in_email: true
-          });
-        });
+      try {
+        return JSON.parse(response.text);
+      } catch {
+        return null;
       }
+    };
 
-      return {
-        primary_subject: data.subject,
-        alternate_subject: data.alternate_subject,
-        body: data.body,
-        claims: data.claims || [],
-        generated: true
-      };
-    } catch {
+    const primaryData = await generateVariant('primary');
+    const backupData = await generateVariant('backup');
+
+    if (!primaryData) {
       return {
         primary_subject: '', alternate_subject: '', body: '', claims: [],
         generated: false, blocked_reason: 'Generation failed to produce valid JSON.'
       };
     }
+
+    // Map generated claims into the ledger (Primary takes precedence)
+    if (primaryData.claims) {
+      primaryData.claims.forEach((c: any, i: number) => {
+        ledger.addClaim({
+          claim_id: `claim_${i}`,
+          text: c.text,
+          type: 'XAVIRA_OBSERVATION',
+          supporting_evidence_ids: [c.evidence_id],
+          supporting_signal_ids: [],
+          supporting_correlation_ids: [],
+          confidence: 0.8,
+          allowed_in_email: true
+        });
+      });
+    }
+
+    return {
+      primary_subject: primaryData.subject,
+      alternate_subject: primaryData.alternate_subject,
+      body: primaryData.body,
+      claims: primaryData.claims || [],
+      generated: true,
+      backup_variant: backupData ? {
+        subject: backupData.subject,
+        body: backupData.body
+      } : null
+    };
   }
 }
