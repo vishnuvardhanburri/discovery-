@@ -1,32 +1,49 @@
-# React + TypeScript + Vite
+# XAVIRA — Technical Intelligence Pipeline
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+XAVIRA is a high-precision engineering intelligence engine designed to identify critical technical opportunities and the specific owners responsible for them. Unlike generic lead generation, XAVIRA operates as a **Technical Research Tool**, moving from public signal discovery to evidence-backed human outreach.
 
-Currently, two official plugins are available:
+## 🚀 Core Architecture
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The system follows a strict, evidence-bound pipeline to eliminate hallucinations and pseudo-signals:
 
-## React Compiler
+`PUBLIC SOURCE` $\rightarrow$ `EVIDENCE` $\rightarrow$ `QUALIFIED SIGNAL` $\rightarrow$ `CORRELATION` $\rightarrow$ `OPPORTUNITY` $\rightarrow$ `VERIFIED OWNER` $\rightarrow$ `CONTACTABILITY` $\rightarrow$ `OUTREACH PACKAGE` $\rightarrow$ `MANUAL OUTREACH CARD`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Key Intelligence Engines
 
-## Expanding the Oxlint configuration
+- **Owner Intelligence Engine**: A target-driven "hunt" process that differentiates between nominal owners (e.g., VPs) and actual technical owners (e.g., Staff Infrastructure Engineers) using a multi-source fallback chain.
+- **Outreach Intelligence Engine**: Transforms research into a validated communication package. 
+  - **ClaimLedger**: Maps every sentence in an email to a specific `SOURCE_FACT`.
+  - **OutreachClaimValidator**: A hard gate that blocks any output containing unsupported factual assertions.
+  - **EvidencePackBuilder**: Prunes research to the "Smallest Defensible Set" for high-signal, low-noise communication.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## 🛠 Human Outreach Mode
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+XAVIRA is designed for **Human-in-the-Loop** operation. It does not send emails automatically. Instead, it generates a **Manual Outreach Card**:
+
+- **Target Intelligence**: Verified role, company, and technical alignment.
+- **Validated Drafts**: A primary high-precision email and a low-friction backup variant.
+- **Briefing Notes**: A summary of the evidence and the specific "angle" for the outreach.
+- **Reply Evidence Pack**: A pre-constructed technical payload ready to be sent if the prospect asks, "Can you send me what you found?".
+
+## 🧪 Technical Invariants
+
+1. **Evidence-Bound Generation**: Generation creates language, not facts. All technical claims must map to a `SOURCE_FACT` or `XAVIRA_OBSERVATION`.
+2. **Zero-Guessing Policy**: Contacts are only marked as "Verified" if evidence exists; no guessed emails are promoted.
+3. **Engineer-to-Engineer Tone**: Strict ban on marketing fluff ("revolutionary", "game-changing", "10x").
+
+## 💻 Getting Started
+
+### Installation
+```bash
+npm install
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+### Running the Intelligence Pipeline
+```bash
+npm run dev
+```
+
+### Running Tests
+```bash
+npm test
+```
