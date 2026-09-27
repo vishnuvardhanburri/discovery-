@@ -2,7 +2,7 @@
 
 XAVIRA is a high-precision engineering intelligence engine designed to identify critical technical opportunities and the specific owners responsible for them. Unlike generic lead generation, XAVIRA operates as a **Technical Research Tool**, moving from public signal discovery to evidence-backed human outreach.
 
-## 🚀 Core Architecture
+##  Core Architecture
 
 The system follows a strict, evidence-bound pipeline to eliminate hallucinations and pseudo-signals:
 
