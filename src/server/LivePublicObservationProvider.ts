@@ -79,6 +79,7 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
 
       let evidence = this.createEvidence(currentUrl, status, `HTTP ${status} observed`, 1, false, notTested, text);
       evidence.latency_ms = latency;
+      evidence.baseline_latency_ms = latency;
       
       const isJson = response.headers.get('content-type')?.includes('application/json');
       evidence.source_type = isJson || currentUrl.includes('/api/') ? 'API_ENDPOINT' : 'PUBLIC_DOCUMENTATION';

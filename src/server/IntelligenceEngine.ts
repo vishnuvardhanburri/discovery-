@@ -1,8 +1,11 @@
-import { 
+import {
   IntelligenceCase, Evidence, ProspectDecision, FindingClassification,
   TechnicalThesis, TechnicalOwner, FindingStrength, UncertaintyModel, FindingLedEmail, FindingType, SeverityLevel, EngineMode, EvidenceClaim, PublicObservationProvider
 } from './IntelligenceCase';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
+import { SignalCorrelationEngine } from './signals/SignalCorrelationEngine';
+import { OpportunityDetector } from './findings/OpportunityDetector';
+import type { DeepSignal } from './DeepTypes';
 
 export class IntelligenceEngine {
   static async run(
@@ -87,13 +90,57 @@ export class IntelligenceEngine {
     audit_trail.push(`Finding resolution completed. Resolved evidence count: ${resolvedEvidence.length}`);
     onProgress?.('findings', `Finding resolved: ${classification.finding_type} (${classification.impact_severity}).`);
 
+    // ── CROSS-SIGNAL CORRELATION (computed before classification gates) ──
+    const deepSignals: DeepSignal[] = evidenceList
+      .filter(e => e.observed_behavior && e.public_url)
+      .map((e) => {
+        const fullText = (e.evidence_text || e.raw_observation || '') as string;
+        const combinedText = (e.observed_behavior + ' ' + fullText).slice(0, 2000);
+        return {
+          signal_id: 'sig_' + e.id,
+          type: (e.source_type || 'PUBLIC_INSIGHT') as any,
+          category: (e.source_type || 'observation') as any,
+          source_url: e.public_url,
+          source_title: e.source_title || '',
+          excerpt: combinedText,
+          relevance: 'Technical signal from public observation',
+          signal_strength: e.repeatable === true && (e.reproductions || 0) >= 2 ? 'HIGH' : (e.repeatable === true ? 'MEDIUM' : 'LOW'),
+          provenance: (e.evidence_origin || 'REAL_PUBLIC_OBSERVATION') as any,
+          related_evidence_ids: [e.id],
+          published_at: e.retrieved_at,
+        } as DeepSignal;
+      });
+
+    const correlationResult = SignalCorrelationEngine.correlate(deepSignals, evidenceList);
+    const correlatedGroups = correlationResult.groups;
+    audit_trail.push(`Correlation: ${correlatedGroups.length} group(s), dominant: ${correlationResult.dominantTheme || 'none'}`);
+
+    // ── ENGINEERING PRESSURE CLASSIFICATION ──────────────────────────────
+    const pressure = correlatedGroups.length > 0
+      ? 'CONTEXT'
+      : deepSignals.length >= 3 ? 'SIGNAL'
+      : deepSignals.length >= 1 ? 'SIGNAL'
+      : 'UNKNOWN';
+
+    // ── OPPORTUNITY DETECTION ─────────────────────────────────────────────
+    const opps = OpportunityDetector.detect(deepSignals, evidenceList);
+    const findingAssessment = opps.length > 0
+      ? OpportunityDetector.evaluateFinding(opps[0]!, evidenceList.length, correlatedGroups.length)
+      : { classification: 'LOW_VALUE' as const, opportunity: null, explanation: 'No engineering opportunities detected.', evidenceIds: [], rejectedSignals: [], evaluatedAt: new Date().toISOString() };
+    audit_trail.push(`Pressure: ${pressure}`);
+    audit_trail.push(`Opportunity: ${findingAssessment.classification}`);
+
+    if (correlationResult.shouldDeepResearch && opps.length > 0) {
+      onProgress?.('findings', `Engineering opportunity: ${findingAssessment.classification}`);
+    }
+
     if (classification.finding_type === 'GENERIC_ENGINEERING_ARTICLE') {
        audit_trail.push('Classification: Generic engineering content. No explicit finding established.');
-       return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'RESEARCH_MORE', audit_trail, mode);
+       return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'RESEARCH_MORE', audit_trail, mode, 'N/A', deepSignals, correlatedGroups, pressure, findingAssessment.classification);
     }
     if (classification.finding_type === 'CONFLICTING_EVIDENCE') {
       audit_trail.push('Classification: Conflicting findings from multiple evidence sources. Requires manual resolution.');
-      return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'RESEARCH_MORE', audit_trail, mode);
+      return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'RESEARCH_MORE', audit_trail, mode, 'N/A', deepSignals, correlatedGroups, pressure, findingAssessment.classification);
    }
 
     const thesis = this.generateTechnicalThesis(resolvedEvidence, classification);
@@ -136,7 +183,7 @@ export class IntelligenceEngine {
       
       if (claim_validation === 'FAILED') {
         audit_trail.push('Claim QA Failed: Generated claims could not be structurally supported by evidence.');
-        return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'NO_GO', audit_trail, mode, 'FAILED');
+        return this.createTerminalCase(companyName, evidenceList, discovery_errors, resolvedEvidence, 'FIT', 'NO_GO', audit_trail, mode, 'FAILED', deepSignals, correlatedGroups, pressure, findingAssessment.classification);
       }
     }
 
@@ -160,7 +207,11 @@ export class IntelligenceEngine {
       body,
       claim_validation,
       audit_trail,
-      mode
+      mode,
+      signals: deepSignals,
+      correlated_groups: correlatedGroups,
+      pressure_classification: pressure,
+      opportunity_classification: findingAssessment.classification,
     };
   }
 
@@ -177,10 +228,19 @@ export class IntelligenceEngine {
     }
   }
 
-  private static createTerminalCase(company: string, evidence: Evidence[], discovery_errors: number, resolved_evidence: Evidence[], fit_status: any, decision: any, audit_trail: string[], mode: EngineMode, claim_validation: string = 'N/A'): IntelligenceCase {
+  private static createTerminalCase(
+    company: string, evidence: Evidence[], discovery_errors: number, resolved_evidence: Evidence[],
+    fit_status: any, decision: any, audit_trail: string[], mode: EngineMode,
+    claim_validation: string = 'N/A',
+    signals?: any[], correlated_groups?: any[], pressure?: string, opportunity?: string,
+  ): IntelligenceCase {
     return {
-      company, fit_status, evidence, resolved_evidence, discovery_errors, contradictions: [], prospect_decision: decision, 
-      subject: '', body: '', claim_validation, audit_trail, mode
+      company, fit_status, evidence, resolved_evidence, discovery_errors, contradictions: [], prospect_decision: decision,
+      subject: '', body: '', claim_validation, audit_trail, mode,
+      ...(signals ? { signals } : {}),
+      ...(correlated_groups ? { correlated_groups } : {}),
+      ...(pressure ? { pressure_classification: pressure } : {}),
+      ...(opportunity ? { opportunity_classification: opportunity } : {}),
     };
   }
 

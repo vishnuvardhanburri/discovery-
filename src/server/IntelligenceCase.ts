@@ -301,6 +301,7 @@ export interface IntelligenceCase {
   pressure_classification?: string;
   signals?: any[];
   correlated_groups?: any[];
+  opportunity_classification?: string;
   confidence?: {
     evidence_confidence: StrengthLevel;
     technical_confidence: StrengthLevel;
