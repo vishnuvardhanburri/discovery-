@@ -3,20 +3,6 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * Extracts publicly listed professional identities from discovered company
  * pages and produces evidence-backed OwnerCandidate objects.
- *
- * Heuristics (deliberately conservative — never fabricate):
- *   - People are extracted from ANY professional page category, with
- *     confidence scaled by the strength of the source context:
- *       HIGH   = person + role explicitly listed on a team/people/about page
- *       MEDIUM = person + role on an engineering/blog/docs page
- *       LOW    = person + role on another public page (careers, etc.)
- *   - A name is required; pages that merely mention "the CTO spoke at …"
- *     without a listed person are not fabricated into a candidate.
- *   - Every candidate carries source_urls and verbatim evidence excerpts so the
- *     claim is fully traceable.
- *   - False positives from JS-rendered UI fragments ("Use Case Ve", "Docs Dire",
- *     template strings, nav labels) are rejected via general token + phrase
- *     dictionaries, NOT by hard-coding individual fake names.
  */
 
 import {
@@ -26,13 +12,6 @@ import {
   StrengthLevel
 } from './IntelligenceCase';
 
-/**
- * Tokens that are NEVER a human name on a professional listing: UI labels,
- * navigation text, documentation labels, component/brand fragments and common
- * English words that appear on JS-rendered pages ("use case", "docs", "dire",
- * "ve", ...). A general category list — not a hard-coded fix for any one fake
- * name. Combined with NAME_TOKEN_RE this makes extraction conservative.
- */
 const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
   'use','case','docs','doc','dire','ve','re','demo','test','example','etc','page','pages',
   'section','menu','button','buttons','icon','icons','avatar','avatars','user','users',
@@ -85,21 +64,7 @@ const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
   'value','mission','vision','goal','strategy','plan','roadmap','timeline','process','pipeline',
   'design','style','theme','version','edition','tier','level','stage','status','type','kind',
   'form','field','label','placeholder','input','output','result','outcome','feed','story',
-  'post','article','news','media','contents','content','sign','in','out',
-  // ── General non-name words frequently found in award / sector / service-label contexts ──
-  'ranked','ranking','shortlisted','shortlist','recognised','recognized',
-  'leading','top','award','awards','winner','winners','nominee','nominees',
-  'sector','sectors','excellence','outstanding','performance','innovation',
-  'innovative','transformative','transformation','digital','technology',
-  'supplier','suppliers','organisation','organizations','ecosystem','education',
-  'growth','impact','strength','quality','index','standing','market','markets',
-  'executive','board','stakeholder','stakeholders','recognition','achievement',
-  'honour','honored','certificate','certified','certification','credentials',
-  'tussell','statista','fastest','growth','function','functions','departmental',
-  'commercial','industrial','specialist','general','b2b','b2c','saas',
-  'marketplace','exchange','network','networks','system','systems',
-  'security','privacy','compliance','governance','risk','control','controls',
-  'transformation','suppliers','providers','recognition','achievements',
+  'post','article','news','media','contents','content','sign','in','out'
 ]);
 const NON_NAME_PHRASES: ReadonlyArray<string> = [
   'use case','get started','sign in','sign up','log in','log out','lorem','case study',
@@ -109,22 +74,18 @@ const NON_NAME_PHRASES: ReadonlyArray<string> = [
   'dont have','already have','sign up for','sign up to','subscribe now','subscribe today',
   'terms of','privacy policy','cookie policy','press contact','media contact','sign in',
   'log in','sign up','sign out','log out','new here','create account','make account',
-  // ── Award / sector / service-title fragments that are NOT person names ──
   'ranked','shortlisted','best public','public sector','top','leading',
   'recognised','recognized','fastest growing','award winner','nominee',
   'tussell tech','ft1000','financial times','statista',
   'ecosystem','education sector','technology supplier','tech supplier',
 ];
-/** A single name token: Capitalized word, 1–24 lowercase letters (rejects "Ve"/"Re"; allows "Doe", "Elizabeth"). */
 const NAME_TOKEN_RE = /^[A-Z][a-z]{1,24}$/;
 
 export interface PeopleExtractorOptions {
   company?: string;
-  /** Role keywords that map to a technical area context (e.g. security, infra). */
   technicalAreaHints?: string[];
 }
 
-/** A single raw person mention extracted from HTML. */
 export interface RawPerson {
   name: string;
   role: string;
@@ -133,18 +94,11 @@ export interface RawPerson {
 }
 
 export class PeopleExtractor {
-  /**
-   * Extract owner candidates across a set of discovered pages.
-   * Scans ALL professional page categories — not just team/about — so that
-   * people listed on engineering pages, blog posts, docs, etc. are discovered
-   * even when no dedicated team page exists. Confidence is scaled by category.
-   */
-  static extractFromPages(pages: DiscoveredPage[], htmlByUrl: Map<string, string>, options: PeopleExtractorOptions = {}): OwnerCandidate[] {
-    const candidates: OwnerCandidate[] = [];
+  static extractFromPages(pages: any[], htmlByUrl: Map<string, string>, options: PeopleExtractorOptions = {}): any[] {
+    const candidates: any[] = [];
     const company = options.company ?? '';
 
     for (const page of pages) {
-      // Only extract from recognised professional page categories.
       if (!page.category || page.category === 'other' || page.category === 'homepage') continue;
       const shouldExtract = this.shouldExtractFromCategory(page.category);
       if (!shouldExtract) continue;
@@ -153,19 +107,11 @@ export class PeopleExtractor {
       if (!html) continue;
       const raws = this.extractPeopleFromHtml(html, page.url, page.category);
       for (const raw of raws) {
-        // ── Validation pipeline (conservative: never fabricate a person) ──
-        // 1) NAME VALIDATION — reject UI labels, nav text, doc labels, fragments
-        //    (e.g. "Use Case Ve", "Docs Dire", "Mark Hawkins Dire").
         if (!this.isValidPersonName(raw.name)) continue;
-        // 2) ROLE VALIDATION — must be an engineering/technical leadership role
         if (!this.isCandidateRole(raw.role)) continue;
-        // 3) PERSON-CONTEXT VALIDATION — the role must be EXPLICITLY bound to this
-        //    person in the public evidence (rejects "the CTO spoke at…" bylines).
         const ctx = this.personContext(raw, page.category);
         if (!ctx.verified) continue;
-        // 4) COMPANY-CONTEXT VALIDATION — discovered page is the company's own
-        //    domain (always true here). Identity is listed on the company domain.
-        const confidence: StrengthLevel = this.confidenceForCategory(page.category);
+        const confidence: any = this.confidenceForCategory(page.category);
         const relationship = this.relationshipToArea(raw.role, options.technicalAreaHints);
         candidates.push({
           name: this.cleanName(raw.name),
@@ -179,47 +125,13 @@ export class PeopleExtractor {
         });
       }
     }
-
-    // de-dupe by name+role, keeping the highest-confidence entry.
     return this.dedupe(candidates);
   }
 
-  /**
-   * Whether the page category is a legitimate source for person extraction.
-   * Engineering pages and blog posts are included — they often list authors,
-   * team members, or engineering staff with roles.
-   */
-  private static shouldExtractFromCategory(category?: string): boolean {
-    return ['team_people', 'about', 'engineering', 'blog', 'docs', 'careers', 'hiring'].includes(category || '');
-  }
-
-  /**
-   * Confidence level for a given page category.
-   * HIGH = dedicated people/leadership/about listing.
-   * MEDIUM = professional content page (engineering, blog, docs).
-   * LOW = general professional page (careers).
-   */
-  private static confidenceForCategory(category?: string): StrengthLevel {
-    if (category === 'team_people' || category === 'about') return 'HIGH';
-    if (category === 'engineering' || category === 'blog' || category === 'docs') return 'MEDIUM';
-    return 'LOW';
-  }
-
-  /**
-   * Extract people mentions from a single HTML document.
-   * Returns raw mentions (name + role + evidence) that the caller can further
-   * filter against the candidate-role list.
-   *
-   * Uses multiple strategies that are tried independently (not gated on
-   * earlier results), so a person mentioned in a byline on a blog post AND
-   * listed on a team card will produce both mentions — the caller de-dupes.
-   */
   static extractPeopleFromHtml(html: string, sourceUrl: string, category?: string): RawPerson[] {
     const cleaned = this.stripScripts(html);
     const results: RawPerson[] = [];
 
-    // Strategy 1: explicit "Name —/Title" / "Name, Title" pairs in lines that
-    // also contain a candidate role keyword.
     for (const line of this.textLines(cleaned)) {
       const role = this.matchRoleKeyword(line);
       if (!role) continue;
@@ -228,8 +140,6 @@ export class PeopleExtractor {
       results.push({ name, role, source_url: sourceUrl, evidence: [this.sentenceAround(cleaned, line)] });
     }
 
-    // Strategy 2: team/leadership cards. Look for blocks that contain both an
-    // <img alt="Name ..."> and a role keyword nearby.
     const cards = this.extractCards(cleaned);
     for (const card of cards) {
       const role = this.matchRoleKeyword(card);
@@ -237,14 +147,11 @@ export class PeopleExtractor {
       const name = this.extractNameFromCard(card);
       if (!name) continue;
       const evidence = this.sentenceAround(cleaned, card);
-      // Avoid duplicate if already captured by Strategy 1
       if (!results.some(r => r.name === name && r.role === role)) {
         results.push({ name, role, source_url: sourceUrl, evidence: [evidence] });
       }
     }
 
-    // Strategy 3: byline / author links (e.g. <a rel="author">Name</a> ... title)
-    // Always tried — blog posts, docs, and engineering articles use these.
     const authors = this.extractAuthorBylines(cleaned, sourceUrl);
     for (const author of authors) {
       if (!results.some(r => r.name === author.name)) {
@@ -252,7 +159,6 @@ export class PeopleExtractor {
       }
     }
 
-    // Strategy 4: GitHub identity extraction from linked profiles
     const githubIdentities = this.extractGithubIdentities(cleaned, sourceUrl, category);
     for (const raw of githubIdentities) {
       if (!results.some(r => r.name === raw.name && r.evidence[0] === raw.evidence[0])) {
@@ -263,19 +169,165 @@ export class PeopleExtractor {
     return results;
   }
 
-  /**
-   * Extract GitHub-linked identities from company pages. Looks for GitHub profile
-   * links (github.com/username) and README/contributor mentions. Only emits
-   * candidates when a role keyword is present in the surrounding evidence.
-   */
-  private static extractGithubIdentities(html: string, sourceUrl: string, category?: string): RawPerson[] {
+  static targetedExtract(html: string, keywords: string[]): RawPerson[] {
+    const cleaned = this.stripScripts(html);
+    const results: RawPerson[] = [];
+    for (const kw of keywords) {
+      const kwLower = kw.toLowerCase();
+      const lines = this.textLines(cleaned);
+      for (const line of lines) {
+        if (line.toLowerCase().includes(kwLower)) {
+          const role = this.matchRoleKeyword(line);
+          if (!role) continue;
+          const name = this.extractNameFromLine(line, role);
+          if (!name) continue;
+          if (!results.some(r => r.name === name && r.role === role)) {
+            results.push({
+              name,
+              role,
+              source_url: '',
+              evidence: [line]
+            });
+          }
+        }
+      }
+    }
+    return results;
+  }
+
+  static shouldExtractFromCategory(category?: string): boolean {
+    return ['team_people', 'about', 'engineering', 'blog', 'docs', 'careers', 'hiring'].includes(category || '');
+  }
+
+  static confidenceForCategory(category?: string): any {
+    if (category === 'team_people' || category === 'about') return 'HIGH';
+    if (category === 'engineering' || category === 'blog' || category === 'docs') return 'MEDIUM';
+    return 'LOW';
+  }
+
+  static isCandidateRole(role: string): boolean {
+    return (CANDIDATE_ROLES as any).some(r => r.toLowerCase() === role.toLowerCase());
+  }
+
+  static matchRoleKeyword(text: string): string | undefined {
+    const t = text.toLowerCase();
+    const ordered = [
+      'vp engineering', 'vp of engineering', 'vp product', 'vp of product',
+      'director of engineering', 'director of platform', 'director of infrastructure',
+      'head of engineering', 'head of platform', 'head of infrastructure', 'head of security',
+      'platform engineering lead', 'infrastructure lead', 'sre lead',
+      'security lead', 'engineering manager', 'staff engineer', 'principal engineer',
+      'cto', 'cpo', 'technical founder', 'co-founder', 'cofounder'
+    ];
+    for (const kw of ordered) {
+      if (t.includes(kw)) return this.normaliseRole(kw);
+    }
+    return undefined;
+  }
+
+  static normaliseRole(kw: string): string {
+    const map: Record<string, string> = {
+      'vp engineering': 'VP Engineering', 'vp of engineering': 'VP Engineering',
+      'vp product': 'VP Product', 'vp of product': 'VP Product',
+      'director of engineering': 'Director of Engineering',
+      'director of platform': 'Director of Platform',
+      'director of infrastructure': 'Director of Infrastructure',
+      'head of engineering': 'Head of Engineering', 'head of platform': 'Head of Platform',
+      'head of infrastructure': 'Head of Infrastructure', 'head of security': 'Head of Security',
+      'platform engineering lead': 'Platform Engineering Lead',
+      'infrastructure lead': 'Infrastructure Lead',
+      'sre lead': 'SRE Lead',
+      'security lead': 'Security Lead', 'engineering manager': 'Engineering Manager',
+      'staff engineer': 'Staff Engineer', 'principal engineer': 'Principal Engineer',
+      'cto': 'CTO', 'cpo': 'CPO',
+      'technical founder': 'Technical Founder', 'co-founder': 'Co-Founder', 'cofounder': 'Co-Founder'
+    };
+    return map[kw] || kw;
+  }
+
+  static isValidPersonName(name: string): boolean {
+    const tokens = name.replace(/[.,;:\-]/g, '').trim().split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 3) return false;
+    for (const tok of tokens) {
+      if (!NAME_TOKEN_RE.test(tok)) return false;
+      if (NON_NAME_TOKENS.has(tok.toLowerCase())) return false;
+    }
+    const low = name.toLowerCase();
+    for (const phrase of NON_NAME_PHRASES) {
+      if (low.includes(phrase)) return false;
+    }
+    return true;
+  }
+
+  static extractNameFromLine(line: string, role: string): string | undefined {
+    const normalised = line.replace(/[—–−‐‑]/g, ' ');
+    const idx = normalised.toLowerCase().indexOf(role.toLowerCase());
+    if (idx < 0) return undefined;
+    const before = normalised.slice(0, idx);
+    const tokens = before.trim().split(/[\s,;\-]+/).map(t => t.trim()).filter(Boolean);
+    const name = this.grabNameTokens(tokens);
+    return name;
+  }
+
+  static grabNameTokens(tokens: string[]): string | undefined {
+    const picked: string[] = [];
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const t = tokens[i].replace(/[.,;:\-]/g, '');
+      if (/^[A-Z][a-z]+$/.test(t)) {
+        picked.unshift(t);
+      } else {
+        break;
+      }
+      if (picked.length >= 3) break;
+    }
+    if (picked.length >= 2 && picked.length <= 3) {
+      return picked.join(' ');
+    }
+    return undefined;
+  }
+
+  static extractNameFromCard(card: string): string | undefined {
+    const alt = /alt=["']([^"']*)["']/i.exec(card);
+    if (alt) {
+      const name = this.grabNameTokens(alt[1].split(/\s+/).map(t => t.replace(/[.,;]/g, '')));
+      if (name) return name;
+    }
+    const tokens = this.stripTags(card).split(/[\s,;\-]+/).filter(Boolean);
+    return this.grabNameTokens(tokens);
+  }
+
+  static extractCards(html: string): string[] {
+    const regex = /<(div|li)[^>]*class=["'][^"']*(team|member|staff|leadership|person|people-profile|profile)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(html)) !== null) {
+      out.push(m[0]);
+    }
+    return out;
+  }
+
+  static extractAuthorBylines(html: string, sourceUrl: string): RawPerson[] {
+    const out: RawPerson[] = [];
+    const bylineRe = /<a[^>]*rel=["']author["'][^>]*>(.*?)<\/a>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = bylineRe.exec(html)) !== null) {
+      const name = this.grabNameTokens(this.stripTags(m[1]).split(/\s+/).map(t => t.replace(/[.,;]/g, '')));
+      if (name) {
+        const surrounding = this.sentenceAround(html, m[1]);
+        const role = this.matchRoleKeyword(surrounding) || 'Author';
+        out.push({ name, role, source_url: sourceUrl, evidence: [surrounding] });
+      }
+    }
+    return out;
+  }
+
+  static extractGithubIdentities(html: string, sourceUrl: string, category?: string): RawPerson[] {
     const out: RawPerson[] = [];
     const githubRe = /github\.com\/([A-Za-z0-9][A-Za-z0-9_-]{1,38})(?:\/|$|[?"'\s])/gi;
     let m: RegExpExecArray | null;
     while ((m = githubRe.exec(html)) !== null) {
       const username = m[1];
       if (!username) continue;
-      // Look for a role keyword in the surrounding text (±150 chars)
       const start = Math.max(0, m.index - 200);
       const end = Math.min(html.length, m.index + username.length + 200);
       const surrounding = this.stripTags(html.slice(start, end));
@@ -292,17 +344,11 @@ export class PeopleExtractor {
     return out;
   }
 
-  /** Derive a plausible display name for a GitHub username from context, or use
-   * the username capitalised — the name validator will reject non-name tokens.
-   */
-  private static githubDisplayName(username: string, context: string): string {
-    // Normalize dashes and look for Capitalized name tokens near the link.
-    const normalised = context.replace(/[\u2014\u2013\u2212\u2010\u2011]/g, ' ');
+  static githubDisplayName(username: string, context: string): string {
+    const normalised = context.replace(/[—–−‐‑]/g, ' ');
     const tokens = normalised.replace(/[.,;:\-]/g, '').trim().split(/\s+/).filter(Boolean);
-    // Scan for any 2-3 consecutive Capitalized tokens that form a valid name.
     for (let i = 0; i <= tokens.length - 2; i++) {
-      const window = tokens.slice(i, i + 3); // try 2 or 3 tokens
-      // Try 3-token window first
+      const window = tokens.slice(i, i + 3);
       if (window.length >= 3) {
         const three = window.slice(0, 3).join(' ');
         if (this.isValidPersonName(three)) return three;
@@ -312,7 +358,6 @@ export class PeopleExtractor {
         if (this.isValidPersonName(two)) return two;
       }
     }
-    // Fall back to capitalised username — name validator will reject if invalid.
     const display = username.replace(/[_-]/g, ' ');
     const tokens2 = display.split(/\s+/);
     if (tokens2.length >= 2) {
@@ -322,24 +367,21 @@ export class PeopleExtractor {
     return username;
   }
 
-  // ── strategy helpers ─────────────────────────────────────────────────────
-  private static stripScripts(html: string): string {
+  static stripScripts(html: string): string {
     return html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
   }
 
-  private static textLines(html: string): string[] {
-    // Convert block tags to newlines so each person block is its own line.
+  static textLines(html: string): string {
     const block = html.replace(/<\/(p|div|li|h1|h2|h3|h4|h5|h6|section|article|tr)[^>]*>/gi, '\n');
-    // Strip tags but PRESERVE newlines (stripTags collapses whitespace).
     const noTags = block.replace(/<[^>]+>/g, ' ');
     return noTags.split(/\n+/).map(s => s.trim()).filter(s => s.length > 3);
   }
 
-  private static stripTags(html: string): string {
+  static stripTags(html: string): string {
     return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
-  private static sentences(html: string): string[] {
+  static sentences(html: string): string[] {
     return html
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
@@ -348,166 +390,13 @@ export class PeopleExtractor {
       .filter(s => s.length > 10);
   }
 
-  /** Return the full sentence that best contains `snippet`, with HTML stripped. */
-  private static sentenceAround(_html: string, snippet: string): string {
+  static sentenceAround(_html: string, snippet: string): string {
     const lines = this.sentences(_html);
     const found = lines.find(l => l.toLowerCase().includes(snippet.toLowerCase().slice(0, 20)));
     return this.stripTags(found || snippet).slice(0, 300);
   }
 
-  private static matchRoleKeyword(text: string): string | undefined {
-    const t = text.toLowerCase();
-    // Order matters: check multi-word first.
-    const ordered = [
-      'vp engineering', 'vp of engineering', 'vp product', 'vp of product',
-      'director of engineering', 'director of platform', 'director of infrastructure',
-      'head of engineering', 'head of platform', 'head of infrastructure', 'head of security',
-      'platform engineering lead', 'infrastructure lead', 'sre lead',
-      'security lead', 'engineering manager', 'staff engineer', 'principal engineer',
-      'cto', 'cpo', 'technical founder', 'co-founder', 'cofounder'
-    ];
-    for (const kw of ordered) {
-      if (t.includes(kw)) return this.normaliseRole(kw);
-    }
-    return undefined;
-  }
-
-  private static normaliseRole(kw: string): string {
-    const map: Record<string, string> = {
-      'vp engineering': 'VP Engineering', 'vp of engineering': 'VP Engineering',
-      'vp product': 'VP Product', 'vp of product': 'VP Product',
-      'director of engineering': 'Director of Engineering',
-      'director of platform': 'Director of Platform',
-      'director of infrastructure': 'Director of Infrastructure',
-      'head of engineering': 'Head of Engineering', 'head of platform': 'Head of Platform',
-      'head of infrastructure': 'Head of Infrastructure', 'head of security': 'Head of Security',
-      'platform engineering lead': 'Platform Engineering Lead',
-      'infrastructure lead': 'Infrastructure Lead', 'sre lead': 'SRE Lead',
-      'security lead': 'Security Lead', 'engineering manager': 'Engineering Manager',
-      'staff engineer': 'Staff Engineer', 'principal engineer': 'Principal Engineer',
-      'cto': 'CTO', 'cpo': 'CPO',
-      'technical founder': 'Technical Founder', 'co-founder': 'Co-Founder', 'cofounder': 'Co-Founder'
-    };
-    return map[kw] || kw;
-  }
-
-  private static isCandidateRole(role: string): boolean {
-    return CANDIDATE_ROLES.some(r => r.toLowerCase() === role.toLowerCase());
-  }
-
-  /** Extract a plausible person name (2-3 Capitalised words) preceding the role. */
-  private static extractNameFromLine(line: string, role: string): string | undefined {
-    // Normalize em-dash, en-dash, unicode separators to regular space.
-    const normalised = line.replace(/[\u2014\u2013\u2212\u2010\u2011]/g, ' ');
-    const idx = normalised.toLowerCase().indexOf(role.toLowerCase());
-    if (idx < 0) return undefined;
-    const before = normalised.slice(0, idx);
-    // name is the trailing capitalised words of `before`
-    const tokens = before.trim().split(/[\s,;\-]+/).map(t => t.trim()).filter(Boolean);
-    const name = this.grabNameTokens(tokens);
-    return name;
-  }
-
-  private static grabNameTokens(tokens: string[]): string | undefined {
-    // Walk backwards collecting Capitalized words (2-3 tokens).
-    const picked: string[] = [];
-    for (let i = tokens.length - 1; i >= 0; i--) {
-      const t = tokens[i].replace(/[.,;:\-]/g, '');
-      if (/^[A-Z][a-z]+$/.test(t)) {
-        picked.unshift(t);
-      } else {
-        break;
-      }
-      if (picked.length >= 3) break;
-    }
-    if (picked.length >= 2 && picked.length <= 3) {
-      return picked.join(' ');
-    }
-    // Fall back: a token containing a dot, e.g. "Jane.Doe" or "J. Doe"
-    const joined = picked.join(' ');
-    if (joined && /^[A-Z]/.test(joined) && joined.includes('.')) return joined;
-    return undefined;
-  }
-
-  private static extractNameFromCard(card: string): string | undefined {
-    // img alt text often carries the name; or first capitalized line segment.
-    const alt = /alt=["']([^"']*)["']/i.exec(card);
-    if (alt) {
-      const name = this.grabNameTokens(alt[1].split(/\s+/).map(t => t.replace(/[.,;]/g, '')));
-      if (name) return name;
-    }
-    const tokens = this.stripTags(card).split(/[\s,;\-]+/).filter(Boolean);
-    return this.grabNameTokens(tokens);
-  }
-
-  private static extractCards(html: string): string[] {
-    // Grab blocks inside common team-card containers.
-    const regex = /<(div|li)[^>]*class=["'][^"']*(team|member|staff|leadership|person|people-profile|profile)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
-    const out: string[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(html)) !== null) {
-      out.push(m[0]);
-    }
-    return out;
-  }
-
-  private static extractAuthorBylines(html: string, sourceUrl: string): RawPerson[] {
-    const out: RawPerson[] = [];
-    const bylineRe = /<a[^>]*rel=["']author["'][^>]*>(.*?)<\/a>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = bylineRe.exec(html)) !== null) {
-      const name = this.grabNameTokens(this.stripTags(m[1]).split(/\s+/).map(t => t.replace(/[.,;]/g, '')));
-      // Try to find a role keyword in the surrounding sentence.
-      const surrounding = this.sentenceAround(html, m[1]);
-      const role = this.matchRoleKeyword(surrounding) || 'Author';
-      if (name) {
-        out.push({ name, role, source_url: sourceUrl, evidence: [surrounding] });
-      }
-    }
-    return out;
-  }
-
-  private static cleanName(name: string): string {
-    return name.replace(/\s+/g, ' ').trim();
-  }
-
-  private static inferCompanyFromUrl(url: string): string {
-    try {
-      return new URL(url).hostname.replace(/^www\./, '');
-    } catch {
-      return '';
-    }
-  }
-
-  /**
-   * NAME VALIDATION.
-   * A valid person name is 2–3 tokens where every token is a Capitalized word
-   * that is NOT a known non-name token (UI label / nav text / doc label /
-   * component name / common English word). Multi-word non-person phrases are
-   * rejected wholesale. This is what defeats "Use Case Ve", "Docs Dire",
-   * "Mark Hawkins Dire", etc. — generally, not by hard-coding those strings.
-   */
-  private static isValidPersonName(name: string): boolean {
-    const tokens = name.replace(/[.,;:\-]/g, '').trim().split(/\s+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 3) return false;
-    for (const tok of tokens) {
-      if (!NAME_TOKEN_RE.test(tok)) return false;
-      if (NON_NAME_TOKENS.has(tok.toLowerCase())) return false;
-    }
-    const low = name.toLowerCase();
-    for (const phrase of NON_NAME_PHRASES) {
-      if (low.includes(phrase)) return false;
-    }
-    return true;
-  }
-
-  /**
-   * PERSON-CONTEXT VALIDATION.
-   * Returns verified=true only when the role keyword is EXPLICITLY bound to this
-   * person in the public evidence (the same snippet carries both the name and the
-   * role). HIGH confidence requires a people-context page (team_people | about).
-   */
-  private static personContext(raw: RawPerson, category?: string): { verified: boolean; onPeoplePage: boolean } {
+  static personContext(raw: RawPerson, category?: string): { verified: boolean; onPeoplePage: boolean } {
     const onPeoplePage = category === 'team_people' || category === 'about';
     const nameTokens = raw.name.replace(/[.,;:\-]/g, '').split(/\s+/).filter(Boolean);
     if (nameTokens.length < 2) return { verified: false, onPeoplePage };
@@ -518,15 +407,11 @@ export class PeopleExtractor {
       const text = e.toLowerCase();
       const nameIdx = text.indexOf(nameHead);
       if (nameIdx === -1) return false;
-      // Find the actual role keyword that matched in the raw evidence (the
-      // normalized form may differ from the text, e.g. "VP Engineering" vs
-      // "VP of Engineering" — search for both the normalized and raw forms).
       const roleKwNorm = this.matchRoleKeyword(e);
       if (!roleKwNorm) return false;
       const roleLower = roleKwNorm.toLowerCase();
       let roleIdx = text.indexOf(roleLower);
       if (roleIdx === -1) {
-        // Try matching any CANDIDATE_ROLES keyword that appears in the evidence.
         const rawMatch = CANDIDATE_ROLES.find(r => text.includes(r.toLowerCase()));
         if (!rawMatch) return false;
         roleIdx = text.indexOf(rawMatch.toLowerCase());
@@ -539,29 +424,8 @@ export class PeopleExtractor {
     return { verified: cooccur, onPeoplePage };
   }
 
-  private static relationshipToArea(role: string, hints: string[] = []): string {
-    const r = role.toLowerCase();
-    const hint = (hints || []).map(h => h.toLowerCase()).filter(Boolean);
-
-    const area =
-      r.includes('security') ? 'security & trust boundary' :
-      r.includes('infrastructure') || r.includes('sre') || r.includes('platform') ? 'platform, infrastructure & reliability' :
-      r.includes('product') ? 'product & technical direction' :
-      'engineering & technical leadership';
-
-    // If we know the finding area, state relevance explicitly.
-    if (hint.length > 0) {
-      const matched = hint.filter(h => area.includes(h) || r.includes(h));
-      if (matched.length > 0) {
-        return `Role '${role}' explicitly covers ${area} (matched: ${matched.join(', ')}).`;
-      }
-      return `Role '${role}' covers ${area}; relevance to the observed technical area is not explicitly stated on the public page.`;
-    }
-    return `Role '${role}' covers ${area}. Specific ownership must be verified against the finding.`;
-  }
-
-  private static dedupe(candidates: OwnerCandidate[]): OwnerCandidate[] {
-    const best = new Map<string, OwnerCandidate>();
+  static dedupe(candidates: any[]): any[] {
+    const best = new Map<string, any>();
     const rank = { LOW: 0, MEDIUM: 1, HIGH: 2, NOT_APPLICABLE: 0 };
     for (const c of candidates) {
       const key = `${c.name.toLowerCase()}|${c.role.toLowerCase()}`;

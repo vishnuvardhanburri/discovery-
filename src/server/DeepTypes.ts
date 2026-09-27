@@ -95,7 +95,49 @@ export interface DeepContact {
 
 // ── Owner graph ──────────────────────────────────────────────────────────────
 
-export type OwnerConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
+export type OwnerConfidence =
+  | 'NO_OWNER_FOUND'
+  | 'POSSIBLE_OWNER'
+  | 'OWNER_VERIFIED'
+  | 'OWNER_HIGH_CONFIDENCE'
+  | 'OWNER_VERIFIED_CONTACTABLE';
+
+export interface OwnerSearchPlan {
+  target_subsystem: string;
+  role_personas: string[];
+  technical_keywords: string[];
+  seniority_target: 'LEADERSHIP' | 'STAFF' | 'INDIVIDUAL_CONTRIBUTOR';
+  opportunity_id: string;
+}
+
+export interface PersonEvidence {
+  claim: string;
+  source_url: string;
+  source_type: string;
+  observed_at: string;
+  freshness: 'FRESH' | 'AGING' | 'STALE' | 'UNKNOWN';
+  evidence_id: string;
+  confidence: number;
+}
+
+export interface EvidenceLedger {
+  claims: PersonEvidence[];
+}
+
+export interface OwnerResolutionResult {
+  opportunity_id: string;
+  candidates: DeepOwner[];
+  primary_candidate: DeepOwner | null;
+  identity_confidence: number;
+  role_confidence: number;
+  technical_relevance: number;
+  ownership_confidence: number;
+  contactability_confidence: number;
+  evidence_ids: string[];
+  source_urls: string[];
+  verification_state: OwnerConfidence;
+  next_action: 'OUTREACH_CANDIDATE' | 'RESEARCH_MORE';
+}
 
 /**
  * Which provenance layer produced an owner (kept separate per spec).
