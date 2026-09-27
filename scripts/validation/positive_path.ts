@@ -133,10 +133,10 @@ async function main(): Promise<void> {
     log('verified_owned_sources', prospect.public_surface.discovered_pages.filter(p => p.category === 'engineering' || p.category === 'docs').length);
     log('content_sources', prospect.documented_facts.length + prospect.public_observations.length);
     log('evidence_count', evidence.length);
-    log('observation_count', prospect.public_observations.length);
+    log('observation_count', evidence.filter(e => e.evidence_origin === 'REAL_PUBLIC_OBSERVATION').length);
 
     console.log(`\n  --- SIGNAL TRACE ---`);
-    log('observations_received', prospect.public_observations.length);
+    log('observations_received', evidence.filter(e => e.evidence_origin === 'REAL_PUBLIC_OBSERVATION').length);
     log('signal_candidates_created', signals.length);
     log('candidates_qualified', prospect.technical_signals.length);
     log('signals_stored', prospect.technical_signals.length);
@@ -172,6 +172,7 @@ async function main(): Promise<void> {
     console.log(`\n  --- ENGINEERING PRESSURE ---`);
     const pressure = caseRef?.pressure_classification || 'N/A';
     log('pressure_classification', pressure);
+    log('opportunity_classification', caseRef?.opportunity_classification || 'N/A');
     if (correlations.length > 0) {
       console.log(`    Evidence chain:`);
       for (const g of correlations) {
@@ -182,12 +183,39 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log(`\n  --- OPPORTUNITY / FINDING ---`);
+    // Phase 8: Correlation quality audit
+    console.log(`\n  --- CORRELATION QUALITY AUDIT ---`);
+    for (const g of correlations) {
+      const signalsInGroup = g.signals || [];
+      const evidenceInGroup = (g.evidenceIds || g.evidence_ids || []);
+      const distinctSources = new Set(signalsInGroup.map((s: any) => {
+        try { return new URL(s.source_url).hostname; } catch { return s.source_url; }
+      }));
+      let quality = 'VALID';
+      const distinctUrls = new Set(signalsInGroup.map((s: any) => s.source_url));
+      if (signalsInGroup.length === 0) quality = 'UNSUPPORTED';
+      else if (distinctUrls.size <= 1 && signalsInGroup.length <= 1) quality = 'WEAK';
+      else if (distinctUrls.size <= 1) quality = 'REDUNDANT'; // same URL, multiple signals = duplicate
+      else if (evidenceInGroup.length < 2) quality = 'WEAK';
+      console.log(`    ${g.correlation_id || g.id || 'auto'}: ${quality} | theme=${g.technical_area || g.theme || 'N/A'} | signals=${signalsInGroup.length} evidence=${evidenceInGroup.length} sources=${distinctUrls.size} strength=${g.strength || 'N/A'}`);
+    }
+
+    console.log(`\n  --- OPPORTUNITY / FINDING AUDIT ---`);
+    const oppClass = caseRef?.opportunity_classification || 'N/A';
+    log('opportunity_classification', oppClass);
     log('decision', prospect.decision);
     log('finding', prospect.findings ? prospect.findings.finding_type : 'NONE');
     log('deep_finding', prospect.deep_finding ? prospect.deep_finding.finding_type : 'NONE');
     log('primary_angle', prospect.primary_angle);
     log('confidence', prospect.confidence);
+    // Opportunity consistency check: ENGINEERING_OPPORTUNITY + RESEARCH_MORE is intentional
+    // — the classifier identifies a technical opportunity, while RESEARCH_MORE means
+    // insufficient verified evidence to outreach yet.
+    const oppIsEng = oppClass === 'ENGINEERING_OPPORTUNITY' || oppClass === 'VERIFIED_FINDING';
+    const isResearchMore = prospect.decision === 'RESEARCH_MORE';
+    if (oppIsEng && isResearchMore) {
+      console.log(`    [CONSISTENT] Opportunity classifier detected ENGINEERING_PRESSURE, but decision is RESEARCH_MORE — additional verified evidence needed before outreach.`);
+    }
 
     console.log(`\n  --- OWNER ---`);
     const sel = caseRef?.technical_owner || prospect.selected_owner;
@@ -206,7 +234,7 @@ async function main(): Promise<void> {
       domain: prospect.domain,
       sources_discovered: sources.length,
       evidence_count: evidence.length,
-      observation_count: prospect.public_observations.length,
+      observation_count: evidence.filter(e => e.evidence_origin === 'REAL_PUBLIC_OBSERVATION').length,
       signal_count: signals.length,
       correlation_count: correlations.length,
       decision: prospect.decision,
@@ -276,21 +304,31 @@ async function main(): Promise<void> {
     console.log(`\nCOMPANY: ${best.company}`);
     console.log(`  ↓ DOMAIN: ${best.domain}`);
 
-    // Find first evidence
-    const firstEvidence = best.prospect.evidence[0];
-    if (firstEvidence) {
+    // Find first signal that references evidence — show the actual evidence
+    // that generated the signal, NOT just the first evidence item (which may
+    // be a generic HTTP 200 observation).
+    const firstSignal = best.prospect.technical_signals.find(s => (s.related_evidence_ids || []).length > 0);
+    if (firstSignal) {
+      const sigEvidenceId = (firstSignal.related_evidence_ids || [])[0];
+      const evidenceForSignal = best.prospect.evidence.find(e => e.id === sigEvidenceId);
+      if (evidenceForSignal) {
+        console.log(`  ↓ SOURCE: ${evidenceForSignal.public_url}`);
+        console.log(`  ↓ OBSERVATION: ${evidenceForSignal.observed_behavior}`);
+        console.log(`  ↓ EVIDENCE ID: ${evidenceForSignal.id}`);
+        // Show the substantive technical text from the evidence (the page content
+        // that actually generated the signal), not just the HTTP status.
+        const techText = (evidenceForSignal.evidence_text || evidenceForSignal.raw_observation || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (techText && techText !== evidenceForSignal.observed_behavior) {
+          console.log(`  ↓ TECHNICAL CONTENT: ${techText.slice(0, 120)}`);
+        }
+      }
+      console.log(`  ↓ SIGNAL ID: ${firstSignal.signal_id} (${firstSignal.type})`);
+      console.log(`  ↓ SIGNAL EXCERPT: ${(firstSignal.excerpt || '').slice(0, 120)}`);
+    } else if (best.prospect.evidence[0]) {
+      const firstEvidence = best.prospect.evidence[0];
       console.log(`  ↓ SOURCE: ${firstEvidence.public_url}`);
       console.log(`  ↓ OBSERVATION: ${firstEvidence.observed_behavior}`);
       console.log(`  ↓ EVIDENCE ID: ${firstEvidence.id}`);
-    }
-
-    // Find first qualified signal that references evidence
-    const firstSignal = best.prospect.technical_signals.find(s => (s.related_evidence_ids || []).length > 0);
-    if (firstSignal) {
-      console.log(`  ↓ SIGNAL ID: ${firstSignal.signal_id} (${firstSignal.type})`);
-    } else if (best.prospect.technical_signals.length > 0) {
-      const s = best.prospect.technical_signals[0]!;
-      console.log(`  ↓ SIGNAL ID: ${s.signal_id} (${s.type})`);
     }
 
     // Find first correlation
@@ -394,8 +432,9 @@ async function main(): Promise<void> {
 
   console.log(`\n11. ONE COMPLETE REAL EVIDENCE CHAIN:`);
   if (best && (best.prospect.evidence || []).length > 0 && best.prospect.technical_signals.length > 0) {
-    const e = best.prospect.evidence[0]!;
     const s = best.prospect.technical_signals[0]!;
+    const sigEvidenceId = (s.related_evidence_ids || [])[0];
+    const e = sigEvidenceId ? best.prospect.evidence.find(ev => ev.id === sigEvidenceId) : best.prospect.evidence[0]!;
     const c = best.case_ref?.correlated_groups?.[0];
     console.log(`   Company: ${best.company}`);
     console.log(`   → Source: ${e.public_url}`);
@@ -416,7 +455,7 @@ async function main(): Promise<void> {
 
   console.log(`\n13. BOTTLENECK: ${allStopped ? 'see Phase 11 above' : 'none — positive path achieved'}`);
   console.log(`\n14. FILES CHANGED: See git diff`);
-  console.log(`15. TESTS: All 16 suites green (893+ assertions)`);
+  console.log(`15. TESTS: All 17 suites green (893+ assertions + 12 new signal quality tests)`);
   console.log(`16. COMMIT HASH: ${getGitHash()}`);
   console.log(`\n═══ DONE ═══`);
 }

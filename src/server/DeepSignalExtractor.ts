@@ -160,23 +160,13 @@ export class DeepSignalExtractor {
     for (const obs of observations) {
       const mapped = this.mapObservationToSignalType(obs.type, obs.raw_text || obs.text || '');
 
-      // PHASE 2: TRACE ACTUAL OBSERVATION
-      console.log(`\n[OBSERVATION_TRACE]`);
-      console.log(`company=${obs.company || 'UNKNOWN'}`);
-      console.log(`source_url=${obs.url || 'UNKNOWN'}`);
-      console.log(`observation_type=${obs.type}`);
-      console.log(`observation_text="${(obs.raw_text || obs.text || '').slice(0, 500)}..."`);
-
       if (!mapped) {
-        console.log(`[MAPPING_FAILURE] No signal type mapping for obs_type: ${obs.type}`);
         options.onCandidate(null, obs, null);
         continue;
       }
 
       const signalType = mapped.type;
       const detector = mapped.detector;
-
-      console.log(`[MAPPING_SUCCESS] ${obs.type} -> ${signalType}`);
 
       const relatedEvidence = evidenceByUrl.get(obs.url || '') || [];
 
@@ -185,7 +175,6 @@ export class DeepSignalExtractor {
       // When no evidence exists, the observation itself is the evidence.
       const verifiedEvidence = relatedEvidence.filter(e => e.relationship_type !== 'UNVERIFIED');
       if (relatedEvidence.length > 0 && verifiedEvidence.length === 0) {
-        console.log(`[QUARANTINE] Skipping signal extraction for unverified source: ${obs.url}`);
         options.onCandidate(null, obs, signalType);
         continue;
       }
@@ -217,7 +206,6 @@ export class DeepSignalExtractor {
         category: obs.category,
       };
 
-      console.log(`[CANDIDATE_CREATED] ID: ${candidate.id} | Type: ${candidate.type} | Strength: ${candidate.initial_strength}`);
       candidates.push(candidate);
       options.onCandidate(candidate, obs, signalType);
     }
@@ -228,6 +216,15 @@ export class DeepSignalExtractor {
   /**
    * Promote candidates to qualified signals.
    * Stage 2: SignalCandidate -> QualifiedSignal (DeepSignal)
+   *
+   * QUALIFICATION GATES:
+   * 1. Must have matching evidence (by URL) when evidence_ids are declared.
+   * 2. Evidence-backed: must have HIGH/CRITICAL/MEDIUM strength OR corroborating
+   *    evidence from >=2 source types.
+   * 3. Evidence-free candidates: must demonstrate technical specificity — the
+   *    matched text must contain substantive technical language beyond a single
+   *    generic keyword. This prevents navigation noise ("AI SDK", "Platform",
+   *    "Security") from auto-qualifying as signals.
    */
   static qualify(
     candidates: SignalCandidate[],
@@ -239,32 +236,38 @@ export class DeepSignalExtractor {
     for (const cand of candidates) {
       const evidence = observationEvidence.filter(e => cand.evidence_ids.includes(e.id));
 
-      // QUALIFICATION RULES
-      // 1. Must have evidence OR be from a direct HTML observation (no evidence required)
+      // Gate 1: Must have evidence when evidence_ids are declared.
       if (evidence.length === 0 && cand.evidence_ids.length > 0) {
         // Candidates with evidence IDs but no matching evidence — quarantine
-        console.log(`[QUALIFICATION_REJECTED] ${cand.id} | Reason: MISSING_PROVENANCE`);
         cand.qualification_gaps.push('MISSING_PROVENANCE');
         options.onQualification('REJECTED');
         continue;
       }
 
-      // 2. Source strength check — only applies when evidence exists
+      // Gate 2: Evidence-backed candidates must meet strength/corroboration.
       if (evidence.length > 0) {
         const hasHighStrength = evidence.some(e => e.strength === 'HIGH' || e.strength === 'CRITICAL');
         const hasMediumStrength = evidence.some(e => e.strength === 'MEDIUM');
         const hasMultipleSources = new Set(evidence.map(e => e.source_type)).size >= 2;
 
         if (!hasHighStrength && !hasMediumStrength && !hasMultipleSources) {
-          console.log(`[QUALIFICATION_REJECTED] ${cand.id} | Reason: INSUFFICIENT_STRENGTH_OR_CORROBORATION`);
           cand.qualification_gaps.push('INSUFFICIENT_STRENGTH_OR_CORROBORATION');
           options.onQualification('REJECTED');
           continue;
         }
       }
 
+      // Gate 3: Evidence-free candidates (from HTML regex detection) must
+      // demonstrate technical specificity. Generic keyword matches from
+      // navigation or boilerplate must NOT become signals.
+      const specificity = assessSpecificity(cand.raw_match, cand.type);
+      if (!specificity.isSpecific) {
+        cand.qualification_gaps.push(specificity.reason);
+        options.onQualification('REJECTED');
+        continue;
+      }
+
       // Promote to DeepSignal
-      console.log(`[QUALIFICATION_SUCCESS] ${cand.id} | Type: ${cand.type}`);
       qualified.push({
         signal_id: `sig_${cand.id}`,
         type: cand.type,
@@ -273,7 +276,7 @@ export class DeepSignalExtractor {
         provenance: cand.provenance as any,
         signal_strength: cand.initial_strength,
         relevance: `Qualified signal of type ${cand.type} based on verified evidence.`,
-        related_evidence_ids: cand.evidence_ids
+        related_evidence_ids: cand.evidence_ids,
       });
       options.onQualification('QUALIFIED');
     }
@@ -293,6 +296,15 @@ export class DeepSignalExtractor {
       'INFRA_LIMITATION': 'ARCHITECTURE_DISCUSSION',
     };
 
+    // If obsType is already a SignalSourceType (from detector-based extraction),
+    // return it directly — do NOT re-run regex matching which could yield a
+    // different (less specific) signal type.
+    const signalTypes: SignalSourceType[] = ['PUBLIC_INCIDENT', 'STATUS_PAGE', 'TECHNICAL_HIRING', 'API_REFERENCE', 'ARCHITECTURE_DISCUSSION', 'SECURITY_PAGE', 'ENGINEERING_ARTICLE', 'BLOG', 'TECHNICAL_DOCUMENTATION', 'SDK_DOCS', 'NEWS'];
+    if (signalTypes.includes(obsType as SignalSourceType)) {
+      const detector = DETECTORS.find(d => d.type === obsType) || null;
+      return { type: obsType as SignalSourceType, detector };
+    }
+
     if (mapping[obsType]) {
       const detector = DETECTORS.find(d => d.type === mapping[obsType]) || null;
       return { type: mapping[obsType], detector };
@@ -311,27 +323,44 @@ export class DeepSignalExtractor {
     existingEvidence: Evidence[] = [],
     opts: { onProgress?: (stage: string, msg: string) => void } = {}
   ): DeepSignal[] {
-    console.log(`\n[PROMOTION_FORENSICS] Starting promotion chain for ${observations.length} observations...`);
-
-    // If the second arg is a Map (htmlByUrl), extract text from HTML and build observations
+    // If the second arg is a Map (htmlByUrl), extract text from HTML and build
+    // observations. Per-page, only the highest-priority detector match is kept
+    // (one signal per page max) to prevent navigation-keyword fan-out.
     let obsList: any[] = observations;
     if (observationEvidence instanceof Map) {
       obsList = [];
+      // Priority order: critical technical signals first
+      const priority: SignalSourceType[] = [
+        'PUBLIC_INCIDENT', 'STATUS_PAGE', 'SECURITY_PAGE', 'ARCHITECTURE_DISCUSSION',
+        'TECHNICAL_HIRING', 'API_REFERENCE', 'ENGINEERING_ARTICLE', 'BLOG',
+      ];
       for (const obs of observations) {
         const html = observationEvidence.get(obs.url);
         if (html) {
           const text = textOf(html);
+          let bestDetector: SignalDetector | null = null;
+          let bestMatch: RegExpExecArray | null = null;
+          let bestPriority = Infinity;
           for (const detector of DETECTORS) {
             const m = detector.regex.exec(text);
             if (m) {
-              obsList.push({
-                url: obs.url,
-                type: detector.type,
-                raw_text: sentenceAround(text, m[0]),
-                source_url: obs.url,
-                category: obs.category,
-              });
+              const p = priority.indexOf(detector.type);
+              if (p >= 0 && p < bestPriority) {
+                bestPriority = p;
+                bestDetector = detector;
+                bestMatch = m;
+              }
             }
+          }
+          // Only create one observation per page — the highest-priority match
+          if (bestDetector && bestMatch) {
+            obsList.push({
+              url: obs.url,
+              type: bestDetector.type,
+              raw_text: sentenceAround(text, bestMatch[0]),
+              source_url: obs.url,
+              category: obs.category,
+            });
           }
         }
       }
@@ -355,7 +384,19 @@ export class DeepSignalExtractor {
       }
     });
 
-    const qualified = this.qualify(candidates, evidenceArr, {
+    // Deduplicate candidates by (source_url, type) — collapse semantically
+    // identical signals from the same observation.
+    const seen = new Set<string>();
+    const deduped: SignalCandidate[] = [];
+    for (const c of candidates) {
+      const key = c.source_url + '|' + c.type;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(c);
+      }
+    }
+
+    const qualified = this.qualify(deduped, evidenceArr, {
       onQualification: (res) => {
         if (res === 'REJECTED') candidates_rejected++;
         else if (res === 'QUALIFIED') candidates_qualified++;
@@ -364,13 +405,8 @@ export class DeepSignalExtractor {
 
     signals_stored = qualified.length;
 
-    console.log(`\n[PROMOTION_SUMMARY]`);
-    console.log(`observations_received: ${observations_received}`);
-    console.log(`signal_mapping_success: ${signal_mapping_success}`);
-    console.log(`signal_candidates_created: ${candidates_created}`);
-    console.log(`candidates_rejected: ${candidates_rejected}`);
-    console.log(`candidates_qualified: ${candidates_qualified}`);
-    console.log(`signals_stored: ${signals_stored}`);
+    opts.onProgress?.('signal_summary',
+      `Promotion: ${observations_received} observations → ${candidates_created} candidates → ${candidates_created - deduped.length} deduplicated → ${qualified.length} qualified signals.`);
 
     return qualified;
   }
@@ -389,3 +425,71 @@ export class DeepSignalExtractor {
     return out;
   }
 }
+
+/**
+ * Assess whether a raw_match text represents genuine technical specificity
+ * or just a generic keyword from navigation/boilerplate.
+ *
+ * Evidence-free candidates (from HTML regex detection) must pass this check
+ * to become qualified signals. Generic observations like "HTTP 200 observed"
+ * or navigation text containing "AI SDK / Platform / Security" do NOT qualify
+ * unless the surrounding text demonstrates actual technical meaning.
+ */
+function assessSpecificity(rawText: string, signalType: SignalSourceType): { isSpecific: boolean; reason: string } {
+  const text = (rawText || '').toLowerCase().trim();
+  if (!text || text.length < 15) return { isSpecific: false, reason: 'INSUFFICIENT_SPECIFICITY' };
+
+  // Pure HTTP status observations never produce signals
+  if (/^http \d{3} observed/.test(text)) return { isSpecific: false, reason: 'GENERIC_HTTP_STATUS_NO_TECHNICAL_CONTENT' };
+
+  // Navigation/boilerplate patterns that should NEVER produce signals
+  const navPatterns = [
+    'skip to content', 'copy wordmark', 'download brand assets',
+    'brand guidelines', 'sign in', 'get started', 'learn more',
+    'cookie policy', 'privacy policy', 'terms of service',
+    '© ', 'all rights reserved',
+  ];
+  // If the text is almost ENTIRELY navigation (no substantive technical content),
+  // reject it. We allow a few nav patterns if accompanied by technical terms.
+  let navHits = 0;
+  for (const p of navPatterns) { if (text.includes(p)) navHits++; }
+  if (navHits >= 2) return { isSpecific: false, reason: 'GENERIC_NAVIGATION_TEXT' };
+
+  // Substantive technical infrastructure terms — these are genuine technical
+  // facts when mentioned, not generic marketing. A single mention is sufficient.
+  const substantiveTerms = [
+    'kubernetes', 'k8s', 'microservice', 'microservices', 'terraform',
+    'docker', 'containers', 'containers', 'redis', 'postgres', 'mysql',
+    'cassandra', 'mongodb', 'mongodb', 'elasticsearch', 'kafka', 'rabbitmq',
+    'aws', 'amazon web services', 'google cloud', 'gcp', 'azure', 'cloud-native',
+    'service mesh', 'sharded', 'partitioned', 'distributed',
+    'outage', 'degraded', 'postmortem', 'soc 2', 'iso 27001', 'pci dss',
+    'encryption at rest', 'bug bounty', 'vulnerability disclosure',
+    'site reliability', 'sre', 'terraform', 'distributed systems',
+  ];
+  const hasSubstantiveTerm = substantiveTerms.some(term => text.includes(term));
+  if (hasSubstantiveTerm) return { isSpecific: true, reason: 'SPECIFIC_TECHNICAL_CONTENT' };
+
+  // Type-specific technical vocabulary requirements.
+  // For these, a single substantive term is sufficient (e.g., "Available on AWS").
+  const typeVocab: Record<string, string[]> = {
+    'API_REFERENCE': ['endpoint', 'request', 'response', 'parameter', 'authentication', 'api key', 'rate limit', 'graphql', 'rest api', 'webhook', 'developer portal'],
+    'ENGINEERING_ARTICLE': ['served', 'serving', 'requests per', 'throughput', 'latency', 'database', 'sharded', 'partition', 'cluster', 'node', 'instance', 'deployment', 'migration', 'scaling', 'capacity', 'peak', 'millions of'],
+    'ARCHITECTURE_DISCUSSION': ['deployed', 'infrastructure', 'migration', 'system', 'service', 'container', 'orchestrat', 'mesh', 'pipeline', 'stack', 'runtime', 'compute', 'storage', 'network'],
+    'SECURITY_PAGE': ['soc 2', 'iso 27001', 'pci', 'hipaa', 'encryption', 'compliance', 'audit', 'vulnerability', 'bug bounty', 'penetration', 'security assessment'],
+    'STATUS_PAGE': ['operational', 'degraded', 'incident', 'outage', 'availability', 'uptime', 'real-time', 'monitoring', 'downtime'],
+    'TECHNICAL_HIRING': ['sre', 'site reliability', 'platform engineer', 'infrastructure engineer', 'distributed systems'],
+    'PUBLIC_INCIDENT': ['outage', 'degraded', 'downtime', 'interruption', 'service issue', 'postmortem', 'resolved', 'mitigated'],
+    'BLOG': ['engineering', 'architecture', 'scalability', 'performance', 'system design', 'technical deep', 'infrastructure'],
+  };
+
+  const requiredTerms = typeVocab[signalType as string] || [];
+  const hasTypeVocab = requiredTerms.some(term => text.includes(term.toLowerCase()));
+  if (hasTypeVocab) return { isSpecific: true, reason: 'SPECIFIC_TECHNICAL_CONTENT' };
+
+  // Generic terms like "SDK", "Platform", "API" in navigation context
+  // are NOT sufficient without substantive technical context.
+  return { isSpecific: false, reason: 'GENERIC_OBSERVATION_NO_SPECIFICITY' };
+}
+
+/** Simple stable hash for signal IDs. */
