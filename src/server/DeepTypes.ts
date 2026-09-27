@@ -450,7 +450,106 @@ export interface ActivityEvent {
   related_evidence_ids: string[];
 }
 
-// ── Company research queue (persistent state) ────────────────────────────────
+// ── Outreach Intelligence ───────────────────────────────────────────────────────
+
+export type ClaimType =
+  | 'SOURCE_FACT'
+  | 'XAVIRA_OBSERVATION'
+  | 'XAVIRA_INFERENCE'
+  | 'UNSUPPORTED_ASSUMPTION';
+
+export interface OutreachClaim {
+  claim_id: string;
+  text: string;
+  type: ClaimType;
+  supporting_evidence_ids: string[];
+  supporting_signal_ids: string[];
+  supporting_correlation_ids: string[];
+  confidence: number;
+  allowed_in_email: boolean;
+  reason?: string;
+}
+
+export interface EvidencePack {
+  primary_finding: DeepFinding;
+  supporting_evidence: Evidence[];
+  evidence_ids: string[];
+}
+
+export type OutreachStrategyType =
+  | 'EVIDENCE_FIRST'
+  | 'TECHNICAL_OBSERVATION'
+  | 'QUESTION_LED'
+  | 'CURIOSITY_LED'
+  | 'PEER_TO_PEER'
+  | 'DIAGNOSTIC_CONTEXT';
+
+export interface OutreachStrategy {
+  type: OutreachStrategyType;
+  justification: string;
+  angle: string;
+  tone_constraints: string[];
+}
+
+export interface OutreachInput {
+  opportunity_id: string;
+  company_id: string;
+  company_name: string;
+  person_id: string;
+  recipient_name: string;
+  recipient_role: string;
+  opportunity_type: string;
+  subsystem: string;
+  qualified_signal_ids: string[];
+  correlation_ids: string[];
+  evidence_ids: string[];
+  source_urls: string[];
+  key_observation: string;
+  technical_context: string;
+  owner_reason: string;
+  contactability: DeepContact[];
+  freshness: string;
+  confidence_dimensions: Record<string, number>;
+  source_relationships: string[];
+}
+
+export interface OutreachQualityScore {
+  evidence_specificity: number;
+  recipient_relevance: number;
+  technical_relevance: number;
+  claim_support: number;
+  naturalness: number;
+  brevity: number;
+  cta_quality: number;
+  reasoning: Record<string, string>;
+}
+
+export type OutreachValidationStatus = 'SUPPORTED' | 'INFERENCE' | 'UNSUPPORTED';
+
+export interface OutreachValidationResult {
+  sentence: string;
+  claim_id: string;
+  status: OutreachValidationStatus;
+  evidence_id?: string;
+  reason?: string;
+}
+
+export interface OutreachPackage {
+  recipient: {
+    name: string;
+    role: string;
+    email: string;
+  };
+  subject: string;
+  body: string;
+  opportunity_id: string;
+  evidence_pack_id: string;
+  claim_ledger: OutreachClaim[];
+  quality_score: OutreachQualityScore;
+  verification_state: 'VERIFIED' | 'BLOCKED' | 'NEEDS_REVIEW';
+  qa_status: 'QA_PASSED' | 'QA_FAILED';
+  next_action: 'HUMAN_REVIEW' | 'BLOCKED';
+}
 
 export type QueueState =
   | 'QUEUED' | 'RESOLVING' | 'RESEARCHING' | 'RESEARCH_MORE'
