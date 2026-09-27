@@ -1,15 +1,20 @@
 /**
- * XAVIRA PEOPLE EXTRACTION
+ * XAVIRA PEOPLE EXTRACTION (RESET)
  * ─────────────────────────────────────────────────────────────────────────────
  * Extracts publicly listed professional identities from discovered company
  * pages and produces evidence-backed OwnerCandidate objects.
+ *
+ * Architecture:
+ * RAW_HTML -> Visible Text Pipeline -> Token-Bound Role Match -> Name Candidate
  */
 
 import {
   CANDIDATE_ROLES,
   OwnerCandidate,
   DiscoveredPage,
-  StrengthLevel
+  StrengthLevel,
+  RawPerson,
+  ExtractionMethod
 } from './IntelligenceCase';
 
 const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
@@ -64,8 +69,9 @@ const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
   'value','mission','vision','goal','strategy','plan','roadmap','timeline','process','pipeline',
   'design','style','theme','version','edition','tier','level','stage','status','type','kind',
   'form','field','label','placeholder','input','output','result','outcome','feed','story',
-  'post','article','news','media','contents','content','sign','in','out'
-]);
+  'post','article','news','media','contents','content','sign','in','out',
+  'pricing','plan'
+]);;
 const NON_NAME_PHRASES: ReadonlyArray<string> = [
   'use case','get started','sign in','sign up','log in','log out','lorem','case study',
   'open source','read more','see more','learn more','view all','contact us','no results',
@@ -84,13 +90,6 @@ const NAME_TOKEN_RE = /^[A-Z][a-z]{1,24}$/;
 export interface PeopleExtractorOptions {
   company?: string;
   technicalAreaHints?: string[];
-}
-
-export interface RawPerson {
-  name: string;
-  role: string;
-  source_url: string;
-  evidence: string[];
 }
 
 export class PeopleExtractor {
@@ -128,49 +127,197 @@ export class PeopleExtractor {
     return this.dedupe(candidates);
   }
 
+  static prepareVisibleText(html: string): string {
+    // 1. Remove non-text elements strictly
+    let text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                   .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                   .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+                   .replace(/<!--[\s\S]*?-->/gi, ' ');
+
+    // 2. Inject structural breaks
+    const structuralTags = /<(div|li|article|section|header|footer|p|tr|br)[^>]*>/gi;
+    text = text.replace(structuralTags, ' [BREAK] ');
+
+    // 3. Strip all remaining tags (this removes attributes, class names, etc)
+    text = text.replace(/<[^>]+>/g, ' ');
+
+    // 4. Normalize whitespace
+    text = text.replace(/\s+/g, ' ').trim();
+
+    return text;
+  }
+
   static extractPeopleFromHtml(html: string, sourceUrl: string, category?: string): RawPerson[] {
-    const cleaned = this.stripScripts(html);
     const results: RawPerson[] = [];
 
-    for (const line of this.textLines(cleaned)) {
-      const role = this.matchRoleKeyword(line);
-      if (!role) continue;
-      const name = this.extractNameFromLine(line, role);
-      if (!name) continue;
-      results.push({ name, role, source_url: sourceUrl, evidence: [this.sentenceAround(cleaned, line)] });
+    // LAYER 2: JSON-LD
+    const ldPeople = this.extractFromJsonLd(html);
+    for (const p of ldPeople) {
+      results.push({ ...p, extraction_method: 'JSON_LD' });
     }
 
-    const cards = this.extractCards(cleaned);
-    for (const card of cards) {
-      const role = this.matchRoleKeyword(card);
-      if (!role) continue;
-      const name = this.extractNameFromCard(card);
-      if (!name) continue;
-      const evidence = this.sentenceAround(cleaned, card);
-      if (!results.some(r => r.name === name && r.role === role)) {
-        results.push({ name, role, source_url: sourceUrl, evidence: [evidence] });
+    // LAYER 3: Embedded JSON
+    const embeddedPeople = this.extractFromEmbeddedJson(html);
+    for (const p of embeddedPeople) {
+      results.push({ ...p, extraction_method: 'EMBEDDED_JSON' });
+    }
+
+    // LAYER 1: Visible HTML (Proximity-based)
+    const visibleText = this.prepareVisibleText(html);
+    const tokens = visibleText.split(/\s+/).filter(Boolean);
+
+    for (let i = 0; i < tokens.length; i++) {
+      const roleMatch = this.matchRoleKeyword(tokens.slice(i, i + 5).join(' '));
+      if (!roleMatch) continue;
+
+      // We search in a window around the role.
+      // To handle structural breaks, we include [BREAK] tokens in the window
+      const windowStart = Math.max(0, i - 10);
+      const windowEnd = Math.min(tokens.length, i + 15);
+      const contextWindow = tokens.slice(windowStart, windowEnd).join(' ');
+
+      // IMPORTANT: We must treat [BREAK] as a delimiter when extracting name tokens,
+      // but we allow it to exist in the window for proximity search.
+      const name = this.extractNameFromContext(contextWindow, roleMatch);
+      if (name) {
+        const evidence = this.sentenceAround(html, contextWindow);
+        results.push({
+          name,
+          role: roleMatch,
+          source_url: sourceUrl,
+          evidence: [evidence],
+          extraction_method: 'STATIC_HTML'
+        });
       }
     }
 
-    const authors = this.extractAuthorBylines(cleaned, sourceUrl);
-    for (const author of authors) {
-      if (!results.some(r => r.name === author.name)) {
-        results.push(author);
-      }
+    // Deduplicate results to prevent multiple matches for the same person/role
+    return results.filter((p, index) =>
+      index === results.findIndex(r => r.name === p.name && r.role === p.role)
+    );
+  }
+
+  static extractNameFromContext(context: string, role: string): string | undefined {
+    // Remove the matched role AND common expanded variants to prevent "Officer Jane Doe"
+    const roleVariants = [
+      role,
+      'Chief Technology Officer', 'Chief Product Officer',
+      'VP of Engineering', 'VP of Product',
+      'Director of Engineering', 'Director of Platform', 'Director of Infrastructure',
+      'Head of Engineering', 'Head of Platform', 'Head of Infrastructure', 'Head of Security'
+    ];
+
+    let cleanedContext = context;
+    for (const variant of roleVariants) {
+      cleanedContext = cleanedContext.replace(new RegExp(`\\b${variant}\\b`, 'gi'), ' ');
     }
 
-    const githubIdentities = this.extractGithubIdentities(cleaned, sourceUrl, category);
-    for (const raw of githubIdentities) {
-      if (!results.some(r => r.name === raw.name && r.evidence[0] === raw.evidence[0])) {
-        results.push(raw);
+    const tokens = cleanedContext.split(/[\s,;\-]+|\[BREAK\]/).map(t => t.trim()).filter(Boolean);
+    return this.grabNameTokens(tokens);
+  }
+
+  static extractFromEmbeddedJson(html: string): RawPerson[] {
+    const results: RawPerson[] = [];
+    const patterns = [
+      { name: 'Next.js', regex: /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/gi },
+      { name: 'InitialState', regex: /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});/gi },
+      { name: 'AppStore', regex: /window\.__APP_STATE__\s*=\s*({[\s\S]*?});/gi },
+    ];
+
+    for (const { name, regex } of patterns) {
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(html)) !== null) {
+        try {
+          const json = JSON.parse(m[1]);
+          this.searchJsonForPeople(json, (person) => {
+            // Humanity Heuristic: Validate name before promoting
+            if (this.isValidPersonName(person.name)) {
+              results.push({
+                name: person.name,
+                role: person.role || 'Employee',
+                source_url: '',
+                evidence: [`Embedded ${name} data: ${person.name} is listed as ${person.role || 'Employee'}`],
+              });
+            }
+          });
+        } catch { /* ignore malformed JSON */ }
       }
     }
-
     return results;
   }
 
+  private static searchJsonForPeople(obj: any, callback: (p: { name: string; role: string }) => void): void {
+    if (!obj || typeof obj !== 'object') return;
+
+    if (obj.name && (obj.role || obj.jobTitle || obj.position)) {
+      callback({
+        name: obj.name,
+        role: obj.role || obj.jobTitle || obj.position,
+      });
+    }
+
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const val = obj[key];
+        if (typeof val === 'object' && val !== null) {
+          this.searchJsonForPeople(val, callback);
+        }
+      }
+    }
+  }
+
+  static extractFromJsonLd(html: string): RawPerson[] {
+    const results: RawPerson[] = [];
+    const ldRe = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    let m: RegExpExecArray | null;
+
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const json = JSON.parse(m[1]);
+        const data = this.flattenJsonLd(json);
+
+        for (const item of data) {
+          if (item['@type'] === 'Person') {
+            const name = item['name'];
+            const role = item['jobTitle'] || item['position'];
+            if (name && role) {
+              results.push({
+                name,
+                role,
+                source_url: '',
+                evidence: [`JSON-LD: ${name} is listed as ${role}`],
+              });
+            }
+          } else if (item['@type'] === 'Organization' && item['employee']) {
+            const employees = Array.isArray(item['employee']) ? item['employee'] : [item['employee']];
+            for (const emp of employees) {
+              const name = typeof emp === 'string' ? emp : emp['name'];
+              const role = emp['jobTitle'] || emp['position'];
+              // Strictly require role for Organization employees to avoid broadness
+              if (name && role) {
+                results.push({
+                  name,
+                  role,
+                  source_url: '',
+                  evidence: [`JSON-LD: ${name} listed as ${role} of ${item['name']}`],
+                });
+              }
+            }
+          }
+        }
+      } catch { /* ignore malformed JSON */ }
+    }
+    return results;
+  }
+
+  private static flattenJsonLd(json: any): any[] {
+    if (Array.isArray(json)) return json;
+    if (json['@graph'] && Array.isArray(json['@graph'])) return json['@graph'];
+    return [json];
+  }
+
   static targetedExtract(html: string, keywords: string[]): RawPerson[] {
-    const cleaned = this.stripScripts(html);
+    const cleaned = this.prepareVisibleText(html);
     const results: RawPerson[] = [];
     for (const kw of keywords) {
       const kwLower = kw.toLowerCase();
@@ -186,7 +333,8 @@ export class PeopleExtractor {
               name,
               role,
               source_url: '',
-              evidence: [line]
+              evidence: [line],
+              extraction_method: 'STATIC_HTML'
             });
           }
         }
@@ -217,10 +365,13 @@ export class PeopleExtractor {
       'head of engineering', 'head of platform', 'head of infrastructure', 'head of security',
       'platform engineering lead', 'infrastructure lead', 'sre lead',
       'security lead', 'engineering manager', 'staff engineer', 'principal engineer',
-      'cto', 'cpo', 'technical founder', 'co-founder', 'cofounder'
+      'cto', 'cpo', 'technical founder', 'co-founder', 'cofounder',
+      'chief technology officer', 'chief product officer'
     ];
     for (const kw of ordered) {
-      if (t.includes(kw)) return this.normaliseRole(kw);
+      // Use word boundaries to prevent substring matches (e.g. "customer" -> "CTO")
+      const regex = new RegExp(`\\b${kw}\\b`, 'i');
+      if (regex.test(t)) return this.normaliseRole(kw);
     }
     return undefined;
   }
@@ -239,7 +390,7 @@ export class PeopleExtractor {
       'sre lead': 'SRE Lead',
       'security lead': 'Security Lead', 'engineering manager': 'Engineering Manager',
       'staff engineer': 'Staff Engineer', 'principal engineer': 'Principal Engineer',
-      'cto': 'CTO', 'cpo': 'CPO',
+      'cto': 'CTO', 'cpo': 'CPO', 'chief technology officer': 'CTO', 'chief product officer': 'CPO',
       'technical founder': 'Technical Founder', 'co-founder': 'Co-Founder', 'cofounder': 'Co-Founder'
     };
     return map[kw] || kw;
@@ -247,9 +398,9 @@ export class PeopleExtractor {
 
   static isValidPersonName(name: string): boolean {
     const tokens = name.replace(/[.,;:\-]/g, '').trim().split(/\s+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 3) return false;
+    if (tokens.length < 2 || tokens.length > 4) return false;
     for (const tok of tokens) {
-      if (!NAME_TOKEN_RE.test(tok)) return false;
+      if (!/^[A-Z][a-zA-ZÀ-ſ'-]{0,24}$/.test(tok)) return false;
       if (NON_NAME_TOKENS.has(tok.toLowerCase())) return false;
     }
     const low = name.toLowerCase();
@@ -273,14 +424,20 @@ export class PeopleExtractor {
     const picked: string[] = [];
     for (let i = tokens.length - 1; i >= 0; i--) {
       const t = tokens[i].replace(/[.,;:\-]/g, '');
-      if (/^[A-Z][a-z]+$/.test(t)) {
-        picked.unshift(t);
-      } else {
+      if (!t) continue;
+
+      const lowT = t.toLowerCase();
+      if (NON_NAME_TOKENS.has(lowT)) {
+        return undefined; // Hard reject if we hit a known non-name token
+      }
+
+      if (!/^[A-Z][a-zA-ZÀ-ſ'-]+$/.test(t)) {
         break;
       }
+      picked.unshift(t);
       if (picked.length >= 3) break;
     }
-    if (picked.length >= 2 && picked.length <= 3) {
+    if (picked.length >= 2 && picked.length <= 4) {
       return picked.join(' ');
     }
     return undefined;
@@ -419,7 +576,7 @@ export class PeopleExtractor {
       const lo = Math.min(nameIdx, roleIdx);
       const hi = Math.max(nameIdx, roleIdx) + (roleIdx >= 0 ? roleLower.length : 0);
       const between = text.slice(lo, hi).split(/\s+/).filter(Boolean);
-      return between.length <= 6;
+      return between.length <= 12;
     });
     return { verified: cooccur, onPeoplePage };
   }

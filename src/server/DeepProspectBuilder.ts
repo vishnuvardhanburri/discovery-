@@ -309,7 +309,7 @@ export class DeepProspectBuilder {
     //    No provider is required. If the input dataset has no people, person
     //    discovery still runs independently via public source graph mining.
     const pagesForPeople = surface.discovered_pages.filter(p =>
-      p.category !== undefined && p.category !== 'other' && p.category !== 'homepage'
+      p.category !== undefined && p.category !== 'homepage'
     );
     this.onProgress?.('people', `${pagesForPeople.length} professional page(s) for person discovery.`);
 
@@ -339,19 +339,20 @@ export class DeepProspectBuilder {
     // never promote LOW/MEDIUM. Public candidates from PeopleExtractor provide
     // optional corroboration (a Growjo-identified person need NOT appear on the
     // company's own team/leadership page).
-    const op = OwnerPipeline.resolve({
-      company: surface.company,
-      targetDomain: this.resolution?.official_domain || parsed.hostname,
-      technicalArea,
-      classification: null,
-      resolvedEvidence: [],
-      growjoData: null,           // PersonDiscoveryEngine already processed provider data
-      providerCompanies: null,    // PersonDiscoveryEngine already processed provider data
-      publicCandidates: people,   // unified candidates from all sources (provider-agnostic)
-      onProgress: (stage, message) => this.onProgress?.('owners', message),
-    });
-    const selectedOwner = op.selected;
-    const sel = { candidate: op.selectedCandidate, ownerEvidenceString: op.ownerEvidenceString, reason: op.reason };
+    const opPipeline = new OwnerPipeline(
+      new LiveWebResearchProvider(),
+      new PeopleExtractor()
+    );
+
+    // Fix: Move Owner Resolution AFTER IntelligenceEngine.run (which creates caseRef)
+    // The previous code had it at line 342, but caseRef was created at line 368.
+    // I will move this entire block below the caseRef creation.
+
+    // (I will now perform a larger edit to move the block)
+
+    let selectedOwner: DeepOwner | null = null;
+    let sel = { candidate: null as any, ownerEvidenceString: '', reason: '' };
+    let op: any = { candidates: [], provenance: 'NONE' };
     this.onProgress?.('owners', selectedOwner
       ? `Selected owner: ${selectedOwner.name} (${selectedOwner.role}) — ${selectedOwner.confidence} (responsibility: ${selectedOwner.finding_link}, provenance: ${op.provenance}).`
       : 'Owner graph: no evidence-backed owner discovered.');
@@ -368,9 +369,9 @@ export class DeepProspectBuilder {
       caseRef = await IntelligenceEngine.run(
         surface.company,
         surface.homepage,
-        sel.candidate?.name || '',
-        sel.candidate?.role || '',
-        sel.ownerEvidenceString,
+        '',
+        '',
+        '',
         [],
         'PRODUCTION',
         undefined,
@@ -386,6 +387,26 @@ export class DeepProspectBuilder {
       auditTrail.push(`Pipeline error: ${e?.message || String(e)}`);
       return this.failProspect(parsed, htmlByUrl, auditTrail, `Pipeline error: ${e?.message || String(e)}`);
     }
+
+    // NOW perform owner resolution with the finalized IntelligenceCase
+    const resolution = await opPipeline.resolve(
+      caseRef.case_id,
+      caseRef.finding_classification,
+      caseRef.evidence
+    );
+    selectedOwner = resolution.primary_candidate;
+    op = {
+      candidates: resolution.candidates,
+      provenance: resolution.verification_state,
+      candidate: resolution.primary_candidate,
+      ownerEvidenceString: resolution.candidates.length > 0 ? 'Corroborated via targeted discovery' : '',
+      reason: resolution.verification_state
+    };
+    sel = {
+      candidate: resolution.primary_candidate,
+      ownerEvidenceString: op.ownerEvidenceString,
+      reason: op.reason
+    };
     auditTrail.push(`Engine decision: ${caseRef.prospect_decision}; finding: ${caseRef.finding_classification?.finding_type || 'NONE'}`);
     this.onProgress?.('findings', `finding: ${caseRef.finding_classification?.finding_type || 'NONE'} (${caseRef.finding_classification?.impact_severity || 'UNKNOWN'}); decision: ${caseRef.prospect_decision}`);
 
