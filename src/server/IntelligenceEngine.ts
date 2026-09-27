@@ -5,6 +5,7 @@ import {
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
 import { SignalCorrelationEngine } from './signals/SignalCorrelationEngine';
 import { OpportunityDetector } from './findings/OpportunityDetector';
+import { DeepSignalExtractor } from './DeepSignalExtractor';
 import type { DeepSignal } from './DeepTypes';
 
 export class IntelligenceEngine {
@@ -27,27 +28,30 @@ export class IntelligenceEngine {
     
     let evidenceList: Evidence[] = [];
     
+    if (mode === 'PRODUCTION') {
+      if (!observationProvider) {
+        audit_trail.push('PRODUCTION mode requires an observation provider to prevent mock-leakage.');
+        return this.createTerminalCase(companyName, evidenceList, discovery_errors, [], 'NOT_FIT', 'NO_GO', audit_trail, mode);
+      }
+    }
+
     if (mode === 'TEST') {
       evidenceList = mockEvidence || [];
     } else {
-      let activeProvider = observationProvider;
-      if (!activeProvider) {
-        audit_trail.push('No observation provider supplied. Auto-instantiating LivePublicObservationProvider.');
-        activeProvider = new LivePublicObservationProvider();
-      }
-      
+      const activeProvider = observationProvider || new LivePublicObservationProvider();
+
       audit_trail.push('Observation provider invoked.');
       onProgress?.('evidence', 'Beginning bounded public-surface observation...');
       const result = await activeProvider.observePublicSurface(companyWebsite);
       evidenceList = result.evidence;
       discovery_errors = result.discovery_errors;
-      
+
       audit_trail.push(`Provider returned ${evidenceList.length} observations and ${discovery_errors} network errors.`);
       onProgress?.('evidence', `Provider returned ${evidenceList.length} observations and ${discovery_errors} network errors.`);
-      
+
       const origins = Array.from(new Set(evidenceList.map(e => e.evidence_origin)));
       audit_trail.push(`Evidence origins received: ${origins.join(', ')}`);
-      
+
       for (const ev of evidenceList) {
         if (ev.evidence_origin !== 'REAL_PUBLIC_OBSERVATION' && ev.evidence_origin !== 'DOCUMENTED_SOURCE') {
           audit_trail.push(`Provider returned non-production evidence origin: ${ev.evidence_origin}`);
@@ -91,25 +95,18 @@ export class IntelligenceEngine {
     onProgress?.('findings', `Finding resolved: ${classification.finding_type} (${classification.impact_severity}).`);
 
     // ── CROSS-SIGNAL CORRELATION (computed before classification gates) ──
-    const deepSignals: DeepSignal[] = evidenceList
-      .filter(e => e.observed_behavior && e.public_url)
-      .map((e) => {
-        const fullText = (e.evidence_text || e.raw_observation || '') as string;
-        const combinedText = (e.observed_behavior + ' ' + fullText).slice(0, 2000);
-        return {
-          signal_id: 'sig_' + e.id,
-          type: (e.source_type || 'PUBLIC_INSIGHT') as any,
-          category: (e.source_type || 'observation') as any,
-          source_url: e.public_url,
-          source_title: e.source_title || '',
-          excerpt: combinedText,
-          relevance: 'Technical signal from public observation',
-          signal_strength: e.repeatable === true && (e.reproductions || 0) >= 2 ? 'HIGH' : (e.repeatable === true ? 'MEDIUM' : 'LOW'),
-          provenance: (e.evidence_origin || 'REAL_PUBLIC_OBSERVATION') as any,
-          related_evidence_ids: [e.id],
-          published_at: e.retrieved_at,
-        } as DeepSignal;
-      });
+    const deepSignals = DeepSignalExtractor.extract(
+      evidenceList.filter(e => e.observed_behavior && e.public_url).map(e => ({
+        url: e.public_url,
+        type: e.source_type || 'observation',
+        raw_text: e.observed_behavior,
+        source_url: e.public_url,
+        category: e.source_type || 'observation',
+      })),
+      evidenceList,
+      [],
+      { onProgress: (s, m) => onProgress?.('signals', m) }
+    );
 
     const correlationResult = SignalCorrelationEngine.correlate(deepSignals, evidenceList);
     const correlatedGroups = correlationResult.groups;
@@ -123,9 +120,15 @@ export class IntelligenceEngine {
       : 'UNKNOWN';
 
     // ── OPPORTUNITY DETECTION ─────────────────────────────────────────────
+    const qualifiedSignalTypes = new Set([
+      'PUBLIC_INCIDENT', 'STATUS_PAGE', 'SECURITY_PAGE', 'TECHNICAL_HIRING',
+      'API_REFERENCE', 'ARCHITECTURE_DISCUSSION', 'ENGINEERING_ARTICLE',
+      'BLOG', 'TECHNICAL_DOCUMENTATION', 'SDK_DOCS',
+    ]);
+    const qualifiedSignalCount = deepSignals.filter(s => qualifiedSignalTypes.has(s.type)).length;
     const opps = OpportunityDetector.detect(deepSignals, evidenceList);
     const findingAssessment = opps.length > 0
-      ? OpportunityDetector.evaluateFinding(opps[0]!, evidenceList.length, correlatedGroups.length)
+      ? OpportunityDetector.evaluateFinding(opps[0]!, evidenceList.length, correlatedGroups.length, qualifiedSignalCount)
       : { classification: 'LOW_VALUE' as const, opportunity: null, explanation: 'No engineering opportunities detected.', evidenceIds: [], rejectedSignals: [], evaluatedAt: new Date().toISOString() };
     audit_trail.push(`Pressure: ${pressure}`);
     audit_trail.push(`Opportunity: ${findingAssessment.classification}`);

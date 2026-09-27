@@ -14,6 +14,103 @@
 import type { DeepSignal, SignalSourceType, EvidenceProvenance, SignalStrength, DeepStage } from './DeepTypes';
 import type { Evidence, DiscoveredPage, CompanySurface, SourceRelationship } from './IntelligenceCase';
 
+/**
+ * Incident context classification — determines the semantic polarity of a
+ * keyword match. A match for "downtime" in "no downtime" is NEGATED, not
+ * an actual incident signal.
+ */
+export type IncidentContext =
+  | 'POSITIVE'           // Genuine incident: "service experienced downtime"
+  | 'NEGATED'           // Negated: "no downtime", "zero downtime"
+  | 'HISTORICAL'        // Past event: "experienced an outage last month"
+  | 'RESOLVED'          // Resolved: "incident was resolved", "recovered"
+  | 'HYPOTHETICAL'      // Hypothetical: "could cause downtime"
+  | 'INSTRUCTIONAL'     // Instructional: "prevent downtime", "avoid outages"
+  | 'CURRENT';          // Current ongoing issue: "degraded service"
+
+const NEGATION_WORDS = [
+  /\bno\s+(?:downtime|outage|degrad|errors?|issues?|impact|incident|problems?|failure|interruption)s?\b/gi,
+  /\bnot\s+(?:experience|have|caus|impact|affected|affected|encounter|see|lead|result|affected)\w*\b/gi,
+  /\bwithout\s+(?:downtime|outage|degrad|errors?|impact|interruption)\b/gi,
+  /\bnever\s+(?:downtime|outage|degrad|experience|had|encounter)\w*\b/gi,
+  /\bzero\s*-?\s*downtime\b/gi,
+  /\bzero\s*-?\s*outage\b/gi,
+  /\bzero\s*-?\s*degradation\b/gi,
+  /\bno\s+downtime\b/gi,
+  /\bnegat/i,
+  /\bprevents?\s+(?:downtime|outage|degrad|errors?|impact|interruption)\b/gi,
+  /\bpreventing\s+(?:downtime|outage|degrad|errors?|impact|interruption)\b/gi,
+  /\bprevent\s+(?:downtime|outage|degrad|errors?|impact|interruption)\b/gi,
+  /\bavoids?\s+(?:downtime|outage|degrad|errors?|impact|interruption)\b/gi,
+  /\bresilient/i, /\bresilience\b/gi,
+  /\bmitigat/i,
+  /\bprotects?\s+against\b/gi, /\bprotection\b/gi,
+  /\bsafe\b/gi, /\bsafety\b/gi,
+  /\breliab/i,
+  /\bhighly\s+available\b/gi, /\bhigh\s+availability\b/gi,
+  /\bguarantee\b/gi, /\bguaranteed\b/gi,
+  // Generic "no" before incident keyword
+  /\bno\s+(outage|degradation|incident|downtime|degrad)\b/gi,
+];
+
+// Negation context — check for negation words within the raw match window
+const NEGATION_CONTEXT_PATTERN = /\b(no\s+(?:downtime|outage|degrad|errors?|impact|interruption|incident|problems?|failure)|not\s+(?:experience|have|caus|impact|affected|affected)|without\s+(?:downtime|outage|degrad|errors?)|never\s+(?:downtime|outage|degrad|experience|had)|zero\s*-?\s*downtime|zero\s*-?\s*outage|prevent\s+(?:downtime|outage|degrad|errors?)|avoid\s+(?:downtime|outage|degrad|errors?)|mitigat|resilien|no\s+outage|no\s+degradation|no\s+downtime|no\s+incident)\b/gi;
+
+const RESOLVED_WORDS = [
+  /\bresolved\b/gi, /\brecovered\b/gi, /\bfixed\b/gi, /\brestored\b/gi,
+  /\brecovered?\s+from\b/gi, /\brestored?\s+to\b/gi, /\bback\s+up\b/gi,
+  /\brecovered\s+by\b/gi, /\brestored\s+by\b/gi,
+];
+
+const HISTORICAL_WORDS = [
+  /\blast\s+(?:month|week|year|day)\b/gi, /\bpast\b/gi, /\bpreviously\b/gi,
+  /\bprior\s+to\b/gi, /\bhistorically\b/gi, /\bpreviously\s+experienced\b/gi,
+];
+
+const HYPOTHETICAL_WORDS = [
+  /\bcould\s+/gi, /\bmight\s+/gi, /\bmay\s+/gi, /\bwould\s+/gi,
+  /\bpotential(ly)?\b/gi, /\brisk\b/gi, /\bthreaten\b/gi,
+];
+
+/**
+ * Analyze the semantic context around a detector match.
+ * Inspects a bounded window before and after the keyword to determine
+ * polarity: POSITIVE, NEGATED, HISTORICAL, RESOLVED, HYPOTHETICAL, etc.
+ */
+export function analyzeIncidentContext(rawMatch: string, signalType: SignalSourceType): IncidentContext {
+  if (signalType !== 'PUBLIC_INCIDENT' && signalType !== 'STATUS_PAGE') {
+    return 'CURRENT';
+  }
+
+  const text = rawMatch.toLowerCase();
+
+  // Check for negation within ±80 chars of any incident keyword
+  // (the raw_match is typically a sentence around the match)
+  for (const neg of NEGATION_WORDS) {
+    if (neg.test(text)) return 'NEGATED';
+  }
+
+  // Check for resolved/historical markers
+  for (const res of RESOLVED_WORDS) {
+    if (res.test(text)) return 'RESOLVED';
+  }
+
+  for (const hist of HISTORICAL_WORDS) {
+    if (hist.test(text)) return 'HISTORICAL';
+  }
+
+  for (const hyp of HYPOTHETICAL_WORDS) {
+    if (hyp.test(text)) return 'HYPOTHETICAL';
+  }
+
+  // Check if this is describing a preventive measure (instructional)
+  if (/\b(prevent|avoid|mitigate|reduce|eliminate|design for|built to|ensures?|guarantees?)\s+(downtime|outage|degrad|interruption)/gi.test(text)) {
+    return 'INSTRUCTIONAL';
+  }
+
+  return 'POSITIVE';
+}
+
 type SignalDetector = {
   type: SignalSourceType;
   provenance: (cat: string | undefined, isStatusPage: boolean) => EvidenceProvenance;
@@ -135,6 +232,8 @@ export interface SignalCandidate {
   qualification_gaps: string[];
   provenance: EvidenceProvenance;
   category: string | undefined;
+  /** Semantic context of the match (e.g., NEGATED for "no downtime"). */
+  incident_context?: IncidentContext;
 }
 
 export class DeepSignalExtractor {
@@ -194,16 +293,23 @@ export class DeepSignalExtractor {
       // Provenance from detector, or default
       const provenance = detector ? detector.provenance(obs.category, false) : 'REAL_PUBLIC_OBSERVATION';
 
+      // Semantic context analysis — especially critical for incident keywords.
+      // "no downtime", "zero downtime deployment", "prevent outages" must NOT
+      // become PUBLIC_INCIDENT signals.
+      const rawMatchText = obs.raw_text || obs.text || '';
+      const incidentContext = analyzeIncidentContext(rawMatchText, signalType);
+
       const candidate: SignalCandidate = {
         id: `cand_${signalType}_${hash(obs.url || Math.random().toString())}`,
         type: signalType,
         source_url: obs.url || 'unknown',
-        raw_match: obs.raw_text || obs.text || '',
+        raw_match: rawMatchText,
         initial_strength: strength,
         evidence_ids: relatedIds,
         qualification_gaps: [],
         provenance: provenance as any,
         category: obs.category,
+        incident_context: incidentContext,
       };
 
       candidates.push(candidate);
@@ -244,7 +350,16 @@ export class DeepSignalExtractor {
         continue;
       }
 
-      // Gate 2: Evidence-backed candidates must meet strength/corroboration.
+      // Gate 2: All candidates must demonstrate technical specificity.
+      // Generic keyword matches from navigation or boilerplate must NOT become signals.
+      const specificity = assessSpecificity(cand.raw_match, cand.type);
+      if (!specificity.isSpecific) {
+        cand.qualification_gaps.push(specificity.reason);
+        options.onQualification('REJECTED');
+        continue;
+      }
+
+      // Gate 3: Evidence-backed candidates must meet strength/corroboration.
       if (evidence.length > 0) {
         const hasHighStrength = evidence.some(e => e.strength === 'HIGH' || e.strength === 'CRITICAL');
         const hasMediumStrength = evidence.some(e => e.strength === 'MEDIUM');
@@ -257,12 +372,14 @@ export class DeepSignalExtractor {
         }
       }
 
-      // Gate 3: Evidence-free candidates (from HTML regex detection) must
-      // demonstrate technical specificity. Generic keyword matches from
-      // navigation or boilerplate must NOT become signals.
-      const specificity = assessSpecificity(cand.raw_match, cand.type);
-      if (!specificity.isSpecific) {
-        cand.qualification_gaps.push(specificity.reason);
+      // Gate 4: Semantic negation check. PUBLIC_INCIDENT candidates in negated
+      // or instructional context (e.g., "no downtime", "prevent outages",
+      // "designed to prevent downtime") must NOT become incident signals.
+      // HISTORICAL/RESOLVED incidents are still valid signals (past events
+      // documented publicly) — they represent real technical context.
+      const ctx = cand.incident_context;
+      if (cand.type === 'PUBLIC_INCIDENT' && ctx && ctx !== 'POSITIVE' && ctx !== 'HISTORICAL' && ctx !== 'RESOLVED' && ctx !== 'CURRENT') {
+        cand.qualification_gaps.push(`SEMANTIC_NEGATION:${ctx}`);
         options.onQualification('REJECTED');
         continue;
       }
@@ -324,12 +441,13 @@ export class DeepSignalExtractor {
     opts: { onProgress?: (stage: string, msg: string) => void } = {}
   ): DeepSignal[] {
     // If the second arg is a Map (htmlByUrl), extract text from HTML and build
-    // observations. Per-page, only the highest-priority detector match is kept
-    // (one signal per page max) to prevent navigation-keyword fan-out.
+    // observations. Per-page, at most 2 distinct signal types are emitted
+    // (highest-priority first). This allows genuinely different technical
+    // facts from the same page (e.g., STATUS_PAGE + TECHNICAL_HIRING) while
+    // preventing navigation-keyword fan-out (8 detectors matching a nav bar).
     let obsList: any[] = observations;
     if (observationEvidence instanceof Map) {
       obsList = [];
-      // Priority order: critical technical signals first
       const priority: SignalSourceType[] = [
         'PUBLIC_INCIDENT', 'STATUS_PAGE', 'SECURITY_PAGE', 'ARCHITECTURE_DISCUSSION',
         'TECHNICAL_HIRING', 'API_REFERENCE', 'ENGINEERING_ARTICLE', 'BLOG',
@@ -338,26 +456,25 @@ export class DeepSignalExtractor {
         const html = observationEvidence.get(obs.url);
         if (html) {
           const text = textOf(html);
-          let bestDetector: SignalDetector | null = null;
-          let bestMatch: RegExpExecArray | null = null;
-          let bestPriority = Infinity;
+          const matches: { detector: SignalDetector; match: RegExpExecArray; priority: number }[] = [];
           for (const detector of DETECTORS) {
             const m = detector.regex.exec(text);
             if (m) {
               const p = priority.indexOf(detector.type);
-              if (p >= 0 && p < bestPriority) {
-                bestPriority = p;
-                bestDetector = detector;
-                bestMatch = m;
+              if (p >= 0) {
+                matches.push({ detector, match: m, priority: p });
               }
             }
           }
-          // Only create one observation per page — the highest-priority match
-          if (bestDetector && bestMatch) {
+          // Sort by priority (highest = lowest number = most critical)
+          matches.sort((a, b) => a.priority - b.priority);
+          // Emit at most 3 distinct types per page (highest-priority first)
+          for (let i = 0; i < Math.min(matches.length, 3); i++) {
+            const { detector, match } = matches[i];
             obsList.push({
               url: obs.url,
-              type: bestDetector.type,
-              raw_text: sentenceAround(text, bestMatch[0]),
+              type: detector.type,
+              raw_text: sentenceAround(text, match[0]),
               source_url: obs.url,
               category: obs.category,
             });
@@ -367,7 +484,7 @@ export class DeepSignalExtractor {
     }
 
     const evidenceArr = Array.isArray(observationEvidence) ? observationEvidence : [];
-    evidenceArr.push(...existingEvidence);
+    const finalEvidence = [...evidenceArr, ...(Array.isArray(existingEvidence) ? existingEvidence : [])];
 
     let observations_received = 0;
     let signal_mapping_success = 0;
@@ -376,7 +493,7 @@ export class DeepSignalExtractor {
     let candidates_qualified = 0;
     let signals_stored = 0;
 
-    const candidates = this.extractCandidates(obsList, evidenceArr, {
+    const candidates = this.extractCandidates(obsList, finalEvidence, {
       onCandidate: (cand, obs, mapping) => {
         observations_received++;
         if (mapping) signal_mapping_success++;
@@ -396,7 +513,7 @@ export class DeepSignalExtractor {
       }
     }
 
-    const qualified = this.qualify(deduped, evidenceArr, {
+    const qualified = this.qualify(deduped, finalEvidence, {
       onQualification: (res) => {
         if (res === 'REJECTED') candidates_rejected++;
         else if (res === 'QUALIFIED') candidates_qualified++;

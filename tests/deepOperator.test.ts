@@ -47,7 +47,7 @@ import type { IcpContext } from '../src/server/IcpQualificationEngine';
 const HOME_HTML = `<html><body><nav>
 <a href="/team">Team</a><a href="/leadership">Leadership</a><a href="/developers">Developers</a>
 <a href="/engineering">Engineering</a><a href="/about">About</a><a href="/status">Status</a>
-</nav><h1>Acme Corp</h1><p>Acme builds developer infra.</p></body></html>`;
+</nav><h1>Acme Corp</h1><p>Acme builds developer infra using Kubernetes.</p></body></html>`;
 
 const TEAM_HTML = `<html><body><section class="team">
 <div class="member"><img src="/jane.jpg" alt="Jane Doe"><h3>Jane Doe</h3><p class="title">Head of Engineering</p></div>

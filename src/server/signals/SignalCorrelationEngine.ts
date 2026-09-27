@@ -68,10 +68,23 @@ export class SignalCorrelationEngine {
    * toward the same technical area.
    */
   static correlate(signals: DeepSignal[], evidence: Evidence[]): CorrelationResult {
+    // RUNTIME GUARD: Ensure only qualified, canonical signals enter the correlation engine.
+    // Raw evidence (sig_ev_*) or unqualified objects must be rejected.
+    const qualifiedSignals = signals.filter(s => {
+      const isCanonical = s.signal_id.startsWith('sig_cand_');
+      const hasMetadata = s.type && s.provenance && s.signal_strength;
+      const isNotRawEvidence = !s.signal_id.startsWith('sig_ev_');
+
+      if (!isCanonical || !hasMetadata || isNotRawEvidence === false) {
+        return false;
+      }
+      return true;
+    });
+
     const groups: CorrelatedSignalGroup[] = [];
 
     for (const theme of THEMES) {
-      const matchedSignals = signals.filter(s => {
+      const matchedSignals = qualifiedSignals.filter(s => {
         const text = (s.excerpt + ' ' + (s.source_title || '')).toLowerCase();
         return theme.keywords.some(kw => text.includes(kw.toLowerCase()));
       });

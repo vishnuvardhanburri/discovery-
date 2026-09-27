@@ -236,4 +236,90 @@ console.log('Running signal quality tests...\n');
   console.log('  ✓ TEST 12: RESEARCH_MORE vs OPPORTUNITY semantics consistent');
 }
 
+// ── NEGATION / CONTEXT TESTS (items 13-18) ──────────────────────────────────
+
+// 13. "service experienced downtime" → PUBLIC_INCIDENT (positive context)
+{
+  const html = '<html><body>' +
+    '<article>Our service experienced downtime yesterday when an outage lasted 20 minutes.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/status', html]]);
+  const obs = [{ url: 'https://example.com/status', type: 'PUBLIC_INSIGHT', category: 'status_ops' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  assert(incidentSignals.length > 0, '"service experienced downtime" should produce PUBLIC_INCIDENT');
+  console.log('  ✓ TEST 13: "service experienced downtime" → PUBLIC_INCIDENT');
+}
+
+// 14. "no downtime" → NOT_INCIDENT (negated context rejected)
+{
+  const html = '<html><body>' +
+    '<article>Identical output, no downtime. Our zero-downtime deployment ensures high availability.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/ai-gateway', html]]);
+  const obs = [{ url: 'https://example.com/ai-gateway', type: 'PUBLIC_INSIGHT', category: 'landing' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  assert.strictEqual(incidentSignals.length, 0, '"no downtime" should NOT produce PUBLIC_INCIDENT (negated)');
+  console.log('  ✓ TEST 14: "no downtime" → NOT_INCIDENT (rejected)');
+}
+
+// 15. "zero downtime deployment" → NOT_INCIDENT (preventive/instructional)
+{
+  const html = '<html><body>' +
+    '<article>Our zero-downtime deployment strategy prevents service disruptions and avoids outages.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/blog', html]]);
+  const obs = [{ url: 'https://example.com/blog', type: 'PUBLIC_INSIGHT', category: 'engineering' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  assert.strictEqual(incidentSignals.length, 0, '"zero downtime deployment" should NOT produce PUBLIC_INCIDENT');
+  console.log('  ✓ TEST 15: "zero downtime deployment" → NOT_INCIDENT (rejected)');
+}
+
+// 16. "prevent outages" → NOT_INCIDENT (instructional/preventive)
+{
+  const html = '<html><body>' +
+    '<article>Our architecture prevents outages through redundant design and automatic failover.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/blog', html]]);
+  const obs = [{ url: 'https://example.com/blog', type: 'PUBLIC_INSIGHT', category: 'engineering' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  assert.strictEqual(incidentSignals.length, 0, '"prevent outages" should NOT produce PUBLIC_INCIDENT');
+  console.log('  ✓ TEST 16: "prevent outages" → NOT_INCIDENT (rejected)');
+}
+
+// 17. "incident caused downtime" → PUBLIC_INCIDENT (positive + past)
+{
+  const html = '<html><body>' +
+    '<article>Last month we had an incident that caused downtime for 30 minutes.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/postmortem/001', html]]);
+  const obs = [{ url: 'https://example.com/postmortem/001', type: 'PUBLIC_INSIGHT', category: 'engineering' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  assert(incidentSignals.length > 0, '"incident caused downtime" should produce PUBLIC_INCIDENT');
+  console.log('  ✓ TEST 17: "incident caused downtime" → PUBLIC_INCIDENT');
+}
+
+// 18. "incident was resolved" → HISTORICAL/RESOLVED context (not current incident)
+// Also: meaningful technical context (reliability info) can still create a non-incident signal
+{
+  const html = '<html><body>' +
+    '<article>After the incident was resolved, we analyzed root causes and improved our monitoring. ' +
+    'Our system now handles 50M requests per day on AWS with auto-scaling Kubernetes clusters.</article>' +
+    '</body></html>';
+  const htmlMap = new Map([['https://example.com/postmortem/002', html]]);
+  const obs = [{ url: 'https://example.com/postmortem/002', type: 'PUBLIC_INSIGHT', category: 'engineering' }];
+  const signals = DeepSignalExtractor.extract(obs as any, htmlMap, []);
+  // The "downtime/resolved" context should NOT produce PUBLIC_INCIDENT (historical)
+  const incidentSignals = signals.filter(s => s.type === 'PUBLIC_INCIDENT');
+  // But the technical content about AWS + Kubernetes scaling should still produce a signal
+  const techSignals = signals.filter(s => s.type === 'ARCHITECTURE_DISCUSSION' || s.type === 'ENGINEERING_ARTICLE');
+  assert.strictEqual(incidentSignals.length, 0, '"incident was resolved" should NOT produce current PUBLIC_INCIDENT');
+  assert(techSignals.length > 0, 'Resolved incident page with technical content should still produce a non-incident signal');
+  console.log('  ✓ TEST 18: "incident was resolved" → no incident, technical context still signals');
+}
+
 console.log('\n=== ALL SIGNAL QUALITY TESTS PASSED ===');

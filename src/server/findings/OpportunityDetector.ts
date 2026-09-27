@@ -181,8 +181,18 @@ export class OpportunityDetector {
     return signalType === 'TECHNICAL_HIRING' ? 'Technical hiring' : 'Platform engineering';
   }
 
-  static evaluateFinding(opp: EngineeringOpportunity, evidenceCount: number, correlationCount: number): FindingOutput {
+  static evaluateFinding(
+    opp: EngineeringOpportunity,
+    evidenceCount: number,
+    correlationCount: number,
+    qualifiedSignalCount: number = opp.signalIds.length
+  ): FindingOutput {
     const conf = opp.confidence;
+
+    // Contextual-only evidence (no qualified technical signals from semantic
+    // extraction) must NOT produce ENGINEERING_OPPORTUNITY. CONTEXT pressure
+    // alone → RESEARCH_MORE until verified technical signals are found.
+    const hasQualifiedSignals = qualifiedSignalCount > 0;
 
     if (conf === 'LOW' && correlationCount < 2) {
       return {
@@ -194,21 +204,24 @@ export class OpportunityDetector {
         evaluatedAt: new Date().toISOString(),
       };
     }
-    if (conf === 'LOW' && correlationCount >= 2) {
+    if (conf === 'LOW' && correlationCount >= 3) {
       return {
-        classification: 'ENGINEERING_OPPORTUNITY',
+        classification: hasQualifiedSignals ? 'ENGINEERING_OPPORTUNITY' : 'RESEARCH_MORE',
         opportunity: opp,
-        explanation: `Low confidence but corroborated by ${correlationCount} source(s).`,
+        explanation: `Low confidence but corroborated by ${correlationCount} source(s).${!hasQualifiedSignals ? ' No qualified technical signals — needs verification.' : ''}`,
         evidenceIds: opp.evidenceIds,
         rejectedSignals: [],
         evaluatedAt: new Date().toISOString(),
       };
     }
-    if (conf === 'MEDIUM' && correlationCount >= 1) {
+    // MEDIUM confidence requires at least 2 independent cross-source correlations.
+    // CONTEXT alone (e.g., a single group of same-page signals) must NOT
+    // automatically produce ENGINEERING_OPPORTUNITY — requires RESEARCH_MORE.
+    if (conf === 'MEDIUM' && correlationCount >= 2) {
       return {
-        classification: 'ENGINEERING_OPPORTUNITY',
+        classification: hasQualifiedSignals ? 'ENGINEERING_OPPORTUNITY' : 'RESEARCH_MORE',
         opportunity: opp,
-        explanation: `Medium confidence with ${correlationCount} corroboration(s).`,
+        explanation: `Medium confidence with ${correlationCount} correlations.${!hasQualifiedSignals ? ' No qualified technical signals — RESEARCH_MORE.' : ''}`,
         evidenceIds: opp.evidenceIds,
         rejectedSignals: [],
         evaluatedAt: new Date().toISOString(),
