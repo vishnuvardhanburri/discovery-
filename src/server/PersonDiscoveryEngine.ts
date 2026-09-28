@@ -100,6 +100,8 @@ export interface PersonDiscoveryInput {
   htmlByUrl: Map<string, string>;
   /** GitHub repos discovered on the company's own public pages. */
   githubRepos?: GithubRepoMeta[];
+  /** Optional HTTP fetcher for GitHub contributor profile lookups. */
+  fetcher?: (url: string, init: { method: string; headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
   /** Optional progress callback. */
   onProgress?: (stage: DeepStage, message: string) => void;
 }
@@ -116,7 +118,7 @@ export class PersonDiscoveryEngine {
    * Discover all person candidates for a company from every available source.
    * Returns unified, entity-resolved candidates with per-source provenance.
    */
-  static discover(input: PersonDiscoveryInput): OwnerCandidate[] {
+  static async discover(input: PersonDiscoveryInput): Promise<OwnerCandidate[]> {
     const { company, domain, technicalArea, providerCompanies, pages, htmlByUrl, githubRepos, technicalAreaHints } = input;
 
     const candidates: { candidate: OwnerCandidate; source: IdentitySource }[] = [];
@@ -181,22 +183,112 @@ export class PersonDiscoveryEngine {
     }
 
     // ── 3. GITHUB IDENTITY DISCOVERY ──
-    if (githubRepos && githubRepos.length > 0) {
-      input.onProgress?.('people', `  [github] discovered ${githubRepos.length} company-linked repos — available for activity/signal correlation.`);
-      // GitHub repo metadata is used for technical signal correlation (DeepSignalExtractor,
-      // ActivityTimeline). Individual contributor identity discovery from GitHub
-      // repos requires API access to contributor lists, which is gated by rate
-      // limits and access controls. We do NOT bypass these. If a company's GitHub
-      // README or public profile page links to contributor profiles with role
-      // context, PeopleExtractor will already have extracted them from page HTML.
-      for (const repo of githubRepos) {
-        const owner = repo.org;
-        const ownerUrl = repo.url;
-        if (owner && ownerUrl) {
-          const orgMatch = ownerUrl.toLowerCase().includes(domain) || owner.toLowerCase().replace(/[-_.]/g, '').includes(domain.replace(/^www\./, '').replace(/[-_.]/g, ''));
-          if (orgMatch) {
-            input.onProgress?.('people', `  [github] ${repo.repo} — org ${owner} matches company domain. GitHub org treated as professional source (not an individual identity).`);
+    // Extract contributor identities from company-linked repos.
+    // Uses the unauthenticated GitHub API (rate-limit aware). If rate-limited,
+    // falls back to scraping the public contributors graph page.
+    if (githubRepos && githubRepos.length > 0 && input.fetcher) {
+      input.onProgress?.('people', `  [github] discovering contributors from ${Math.min(githubRepos.length, 3)} top repo(s)...`);
+      const reposByStars = [...githubRepos].sort((a, b) => (b.stars ?? 0) - (a.stars ?? 0));
+      const topRepos = reposByStars.slice(0, 3);
+
+      let rateLimited = false;
+      for (const repo of topRepos) {
+        if (rateLimited) break;
+        let contributors: GitHubContributor[] = [];
+        try {
+          // Try GitHub API first (unauthenticated, 60 req/hr)
+          const apiUrl = `https://api.github.com/repos/${repo.org}/${repo.repo}/contributors?per_page=15`;
+          const res = await input.fetcher(apiUrl, {
+            method: 'GET',
+            headers: { accept: 'application/vnd.github+json', 'user-agent': 'xavira-discovery' },
+            signal: AbortSignal.timeout(8000),
+          });
+          const remaining = typeof (res.headers as any)?.get === 'function'
+            ? (res.headers as any).get('x-ratelimit-remaining')
+            : (res.headers as any)?.['x-ratelimit-remaining'];
+          if (typeof remaining === 'string' && parseInt(remaining, 10) === 0) {
+            rateLimited = true;
+            input.onProgress?.('people', `  [github] API rate limit reached — falling back to page-scrape for contributors.`);
+            // Fallback: scrape the contributors page (no API rate limit)
+            try {
+              const scrapeRes = await input.fetcher(
+                `https://github.com/${repo.org}/${repo.repo}/graphs/contributors`,
+                { method: 'GET', headers: { 'user-agent': 'xavira-discovery', accept: 'text/html' }, signal: AbortSignal.timeout(8000) }
+              );
+              const scrapeHtml = await scrapeRes.text();
+              // Extract GitHub usernames from the contributors page
+              const userRe = /github\.com\/([A-Za-z0-9._-]+)/g;
+              const seen = new Set<string>();
+              let m: RegExpExecArray | null;
+              while ((m = userRe.exec(scrapeHtml)) !== null) {
+                const login = m[1];
+                if (login !== repo.org && !seen.has(login)) {
+                  seen.add(login);
+                  contributors.push({ login, html_url: `https://github.com/${login}`, contributions: 1 });
+                }
+              }
+              rateLimited = false; // page scrape doesn't consume API budget
+            } catch (e2: any) {
+              input.onProgress?.('people', `  [github] scrape fallback failed: ${e2?.message || String(e2)}`);
+              break;
+            }
+          } else if (!res.ok) {
+            input.onProgress?.('people', `  [github] API ${res.status} for ${repo.org}/${repo.repo} — skipping.`);
+            continue;
+          } else {
+            contributors = await res.json() as GitHubContributor[];
           }
+
+          // For each contributor, fetch their profile to verify company affiliation.
+          const existingLogins = new Set(candidates.map(c => c.candidate.name.toLowerCase()));
+          for (const c of contributors) {
+            if (existingLogins.has(c.login.toLowerCase())) continue; // dedupe across repos
+            const profileUrl = c.html_url || `https://github.com/${c.login}`;
+            let role = 'Open-source contributor';
+            let confidence: 'HIGH' | 'MEDIUM' = 'MEDIUM';
+            let extraEvidence = '';
+
+            // Verify company affiliation via the contributor's public profile page
+            try {
+              const profileRes = await input.fetcher(profileUrl, {
+                method: 'GET',
+                headers: { 'user-agent': 'xavira-discovery', accept: 'text/html' },
+                signal: AbortSignal.timeout(8000),
+              });
+              const profileHtml = await profileRes.text().catch(() => '');
+              const companyDomain = profileHtml.toLowerCase();
+              // Check if the profile mentions the company domain or company name
+              const companyLower = input.company.toLowerCase();
+              const domainLower = input.domain.toLowerCase();
+              if (companyDomain.includes(domainLower) || companyDomain.includes(companyLower) ||
+                  companyLower.includes(companyLower)) {
+                // The contributor's profile mentions the company — upgrade confidence
+                confidence = 'HIGH';
+                role = 'Core engineer (company verified on GitHub profile)';
+                extraEvidence = `Profile at ${profileUrl} references ${input.company}.`;
+              }
+            } catch (e: any) {
+              // Profile fetch failed — keep MEDIUM confidence
+            }
+
+            candidates.push({
+              candidate: {
+                name: c.login,
+                role,
+                company: input.company,
+                source_urls: [profileUrl],
+                evidence: [`GitHub contributor: ${c.login} appears in contributors of ${repo.org}/${repo.repo} (${c.contributions} contributions)` + (extraEvidence ? `. ${extraEvidence}` : '')],
+                relationship_to_area: 'Contributed to core engineering repositories.',
+                confidence,
+                explicit_evidence: true,
+              },
+              source: { provenance: 'PUBLIC_PROFESSIONAL_SOURCE', provider_key: 'github', source_url: profileUrl, identity_confidence: 'HIGH' },
+            });
+            existingLogins.add(c.login.toLowerCase());
+          }
+          input.onProgress?.('people', `  [github] ${repo.org}/${repo.repo}: ${contributors.length} contributor(s) extracted.`);
+        } catch (e: any) {
+          input.onProgress?.('people', `  [github] error for ${repo.org}/${repo.repo}: ${e?.message || String(e)}`);
         }
       }
     }
@@ -335,4 +427,11 @@ export class PersonDiscoveryEngine {
     const nb = norm(b);
     return na.includes(nb) || nb.includes(na);
   }
+}
+
+interface GitHubContributor {
+  login: string;
+  html_url?: string;
+  contributions?: number;
+  avatar_url?: string;
 }

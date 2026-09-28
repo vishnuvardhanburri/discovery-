@@ -57,7 +57,7 @@ function makeEvidence(overrides: Partial<Evidence> = {}): Evidence {
 
 function makeSignal(type: string, sourceUrl: string, excerpt: string, strength: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW'): DeepSignal {
   return {
-    signal_id: 'sig_test_' + Math.random().toString(36).slice(2, 8),
+    signal_id: 'sig_cand_' + Math.random().toString(36).slice(2, 8),
     type: type as any,
     source_url: sourceUrl,
     excerpt,

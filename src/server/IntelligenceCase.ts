@@ -202,6 +202,7 @@ export type FindingType =
   | 'DOCUMENTED_ENGINEERING_FAILURE'
   | 'DOCUMENTED_INCIDENT'
   | 'DOCUMENTED_SCALING_CONSTRAINT'
+  | 'DOCUMENTED_SECURITY_POSTURE'
   | 'POSSIBLE_ACCESS_ISSUE'
   | 'GENERIC_ENGINEERING_ARTICLE'
   | 'CONFLICTING_EVIDENCE'
@@ -327,7 +328,7 @@ export interface IntelligenceCase {
 }
 
 export const CANDIDATE_ROLES = [
-  'CTO', 'CPO',
+  'CTO', 'CPO', 'CEO',
   'VP Engineering', 'VP of Engineering', 'VP Product',
   'Director of Engineering', 'Director of Platform', 'Director of Infrastructure',
   'Head of Engineering', 'Head of Platform', 'Head of Infrastructure',
@@ -335,7 +336,7 @@ export const CANDIDATE_ROLES = [
   'Platform Engineering Lead', 'Infrastructure Lead', 'SRE Lead',
   'Security Lead', 'Security Engineer',
   'Engineering Manager', 'Staff Engineer', 'Principal Engineer',
-  'Technical Founder', 'Co-Founder', 'Co-founder'
+  'Technical Founder', 'Founder', 'Co-Founder', 'Co-founder'
 ] as const;
 
 export type CandidateRole = (typeof CANDIDATE_ROLES)[number] | string;

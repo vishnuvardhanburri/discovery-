@@ -85,7 +85,7 @@ export class TargetedDiscoveryEngine {
     const repos = await this.researchProvider.getGithubRepos(org, plan.technical_keywords);
 
     for (const repo of repos) {
-      const contributors = await this.researchProvider.getRepoContributors(org, repo.name);
+      const contributors = await this.researchProvider.getRepoContributors(org, repo.repo);
       for (const contributor of contributors) {
         // Check profile for role match
         const profile = await this.researchProvider.fetchGithubProfile(contributor.login);

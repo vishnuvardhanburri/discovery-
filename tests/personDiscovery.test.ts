@@ -204,7 +204,7 @@ async function main() {
   console.log('==================================================');
 
   // ── 1. Growjo absent → system still works ────────────────────────────────
-  await run('1. Growjo absent — system still works (public candidates only)', () => {
+  await run('1. Growjo absent — system still works (public candidates only)', async () => {
     const result = OwnerPipeline.resolve({
       company: 'Acme Corp',
       targetDomain: 'acme.com',
@@ -221,7 +221,7 @@ async function main() {
   });
 
   // ── 2. Generic CSV only → system still works ─────────────────────────────
-  await run('2. Generic CSV only — system still works', () => {
+  await run('2. Generic CSV only — system still works', async () => {
     const csvProvider: ProviderCompanyLike = {
       source: 'CSV', company: 'Acme Corp', canonical_name: 'Acme Corp',
       domain: 'acme.com', website: 'https://acme.com',
@@ -229,7 +229,7 @@ async function main() {
       primary_email: null, primary_phone: null,
       linkedin_url: null, growjo_url: null, source_url: null, retrieved_at: new Date().toISOString(),
     };
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       technicalAreaHints: ['api', 'backend', 'infrastructure'],
       providerCompanies: [csvProvider],
@@ -242,8 +242,8 @@ async function main() {
   });
 
   // ── 3. Company-name seed only → system still works ───────────────────────
-  await run('3. Company-name seed only — system works with zero provider data', () => {
-    const discovered = PersonDiscoveryEngine.discover({
+  await run('3. Company-name seed only — system works with zero provider data', async () => {
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [],       // ← zero providers
       pages: [], htmlByUrl: new Map(),
@@ -253,8 +253,8 @@ async function main() {
   });
 
   // ── 4. Domain seed only → system still works ─────────────────────────────
-  await run('4. Domain seed only — same as company-name seed', () => {
-    const discovered = PersonDiscoveryEngine.discover({
+  await run('4. Domain seed only — same as company-name seed', async () => {
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'acme.com', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [],
       pages: [], htmlByUrl: new Map(),
@@ -263,7 +263,7 @@ async function main() {
   });
 
   // ── 5. No people in input dataset → autonomous discovery runs ─────────────
-  await run('5. No people in dataset — autonomous public discovery runs', () => {
+  await run('5. No people in dataset — autonomous public discovery runs', async () => {
     // Provider data has company but NO person name
     const noPersonProvider: ProviderCompanyLike = {
       source: 'CSV', company: 'Acme Corp', canonical_name: 'Acme Corp',
@@ -280,7 +280,7 @@ async function main() {
     ];
     const htmlByUrl = new Map([['https://acme.com/team', TEAM_HTML]]);
 
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [noPersonProvider],
       pages, htmlByUrl,
@@ -291,13 +291,13 @@ async function main() {
   });
 
   // ── 6. Growjo people present → they become owner candidates ────────────────
-  await run('6. Growjo people → owner candidates', () => {
+  await run('6. Growjo people → owner candidates', async () => {
     const growjo = mkGrowjo({
       company: 'Acme Corp', domain: 'acme.com',
       primary_person_name: 'Jane Doe', primary_title: 'CTO',
       growjo_url: 'https://app.growjo.com/profile/acme-corp',
     });
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [growjo as any],
       pages: [], htmlByUrl: new Map(),
@@ -310,7 +310,7 @@ async function main() {
   });
 
   // ── 7. Official company page person → candidate ───────────────────────────
-  await run('7. Official company page person → candidate (HIGH)', () => {
+  await run('7. Official company page person → candidate (HIGH)', async () => {
     const pages: DiscoveredPage[] = [
       { url: 'https://acme.com/team', path: '/team', category: 'team_people' },
       { url: 'https://acme.com/about', path: '/about', category: 'about' },
@@ -319,7 +319,7 @@ async function main() {
       ['https://acme.com/team', TEAM_HTML],
       ['https://acme.com/about', TEAM_HTML],
     ]);
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [], pages, htmlByUrl,
     });
@@ -331,7 +331,7 @@ async function main() {
   });
 
   // ── 8. Blog author → candidate only with sufficient context ───────────────
-  await run('8. Blog author with role → MEDIUM candidate; without role → rejected', () => {
+  await run('8. Blog author with role → MEDIUM candidate; without role → rejected', async () => {
     const pages: DiscoveredPage[] = [
       { url: 'https://acme.com/blog/post', path: '/blog/post', category: 'blog' },
       { url: 'https://acme.com/blog/no-role', path: '/blog/no-role', category: 'blog' },
@@ -340,7 +340,7 @@ async function main() {
       ['https://acme.com/blog/post', BLOG_HTML],
       ['https://acme.com/blog/no-role', BLOG_NO_ROLE_HTML],
     ]);
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [], pages, htmlByUrl,
     });
@@ -352,12 +352,12 @@ async function main() {
   });
 
   // ── 9. GitHub identity → candidate only with company association ───────────
-  await run('9. GitHub identity with role + company domain → candidate', () => {
+  await run('9. GitHub identity with role + company domain → candidate', async () => {
     const pages: DiscoveredPage[] = [
       { url: 'https://acme.com/engineering', path: '/engineering', category: 'engineering' },
     ];
     const htmlByUrl = new Map([['https://acme.com/engineering', GITHUB_LINK_HTML]]);
-    const discovered = PersonDiscoveryEngine.discover({
+    const discovered = await PersonDiscoveryEngine.discover({
       company: 'Acme Corp', domain: 'acme.com', technicalArea: 'platform engineering',
       providerCompanies: [], pages, htmlByUrl,
     });
@@ -369,7 +369,7 @@ async function main() {
   });
 
   // ── 10. False UI strings → rejected ───────────────────────────────────────
-  await run('10. False UI strings rejected by PeopleExtractor', () => {
+  await run('10. False UI strings rejected by PeopleExtractor', async () => {
     const cleaned = BLOG_UI_NOISE_HTML;
     const raws = PeopleExtractor.extractPeopleFromHtml(cleaned, 'https://acme.com/blog', 'blog');
     test('10.1 no "Use Case Ve" candidate', !raws.some(r => r.name === 'Use Case Ve'));
@@ -379,7 +379,7 @@ async function main() {
   });
 
   // ── 11. Identity confidence ≠ ownership confidence ────────────────────────
-  await run('11. Identity confidence ≠ ownership confidence', () => {
+  await run('11. Identity confidence ≠ ownership confidence', async () => {
     // Jane has HIGH identity (team page) but let's test that the identity
     // confidence and ownership confidence are tracked separately.
     // We verify this at the OwnerPipeline level: a candidate with HIGH identity
@@ -404,7 +404,7 @@ async function main() {
   });
 
   // ── 12. Person selected without Growjo ────────────────────────────────────
-  await run('12. Person selected without Growjo (public-page candidate)', () => {
+  await run('12. Person selected without Growjo (public-page candidate)', async () => {
     const result = OwnerPipeline.resolve({
       company: 'Acme Corp', targetDomain: 'acme.com',
       technicalArea: 'platform engineering', classification: null, resolvedEvidence: [],
@@ -417,14 +417,14 @@ async function main() {
   });
 
   // ── 13. Contact from different provider than person identity ──────────────
-  await run('13. Contact independent of person identity source', () => {
+  await run('13. Contact independent of person identity source', async () => {
     const registry = new ProviderRegistry();
     test('13.1 registry starts empty (no provider is mandatory)', registry.getProviders().length === 0);
     test('13.2 configurable field precedence exists', !!(registry.fieldPrecedence.company_identity && registry.fieldPrecedence.contact));
   });
 
   // ── 14. Unknown source classified before trust ────────────────────────────
-  await run('14. Unknown source → discover → classify → policy → trust', () => {
+  await run('14. Unknown source → discover → classify → policy → trust', async () => {
     const reg = SourceRegistry.createDefault();
     // Known source
     const known = reg.classify('https://github.com/acme/acme-repo');
@@ -556,7 +556,7 @@ async function main() {
   });
 
   // ── 19. No provider is mandatory ───────────────────────────────────────────
-  await run('19. No provider is mandatory (DeepBuilderOptions accepts nulls)', () => {
+  await run('19. No provider is mandatory (DeepBuilderOptions accepts nulls)', async () => {
     // Verify DeepBuilderOptions accepts all-null provider fields
     const builder = new DeepProspectBuilder({
       fetcher: fakeFetcher({ 'https://acme.com': { status: 200, body: HOME_HTML, ct: 'text/html' } }) as any,

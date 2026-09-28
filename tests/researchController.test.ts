@@ -99,6 +99,7 @@ function makeFakeModelGateway(): XaviraModelGateway {
 
 function makeSignal(overrides: Partial<DeepSignal> & Pick<DeepSignal, 'signal_id'>): DeepSignal {
   return {
+    signal_id: overrides.signal_id || 'sig_cand_' + Math.random().toString(36).slice(2, 8),
     type: (overrides.type || 'BLOG') as SignalSourceType,
     source_url: overrides.source_url || 'https://example.com/blog',
     excerpt: (overrides.excerpt || (overrides as any).text || 'technical article'),
@@ -245,14 +246,14 @@ async function runAll(): Promise<void> {
   {
     const signals: DeepSignal[] = [
       makeSignal({
-        signal_id: 'sig-1',
+        signal_id: 'sig_cand_1',
         type: 'BLOG' as SignalSourceType,
         excerpt: 'scaling our database infrastructure',
         source_url: 'https://company.com/blog',
         signal_strength: 'HIGH' as any,
       }),
       makeSignal({
-        signal_id: 'sig-2',
+        signal_id: 'sig_cand_2',
         type: 'TECHNICAL_HIRING' as SignalSourceType,
         excerpt: 'hiring database engineers and SREs',
         source_url: 'https://company.com/jobs',
@@ -367,10 +368,10 @@ async function runAll(): Promise<void> {
   // ── 9. Cross-source correlation ─────────────────────────────────────
   {
     const signals: DeepSignal[] = [
-      makeSignal({ signal_id: 'sig-1', type: 'BLOG' as SignalSourceType, excerpt: 'database sharding and scaling strategy', source_url: 'https://company.com/blog', signal_strength: 'HIGH' as any }),
-      makeSignal({ signal_id: 'sig-2', type: 'TECHNICAL_HIRING' as SignalSourceType, excerpt: 'hiring distributed systems engineers', source_url: 'https://company.com/jobs', signal_strength: 'HIGH' as any }),
-      makeSignal({ signal_id: 'sig-3', type: 'STATUS_PAGE' as SignalSourceType, excerpt: 'database scaling incident reported', source_url: 'https://status.company.com', signal_strength: 'HIGH' as any }),
-      makeSignal({ signal_id: 'sig-4', type: 'API_REFERENCE' as SignalSourceType, excerpt: 'database API migration notices', source_url: 'https://api.company.com', signal_strength: 'MEDIUM' as any }),
+      makeSignal({ signal_id: 'sig_cand_1', type: 'BLOG' as SignalSourceType, excerpt: 'database sharding and scaling strategy', source_url: 'https://company.com/blog', signal_strength: 'HIGH' as any }),
+      makeSignal({ signal_id: 'sig_cand_2', type: 'TECHNICAL_HIRING' as SignalSourceType, excerpt: 'hiring distributed systems engineers', source_url: 'https://company.com/jobs', signal_strength: 'HIGH' as any }),
+      makeSignal({ signal_id: 'sig_cand_3', type: 'STATUS_PAGE' as SignalSourceType, excerpt: 'database scaling incident reported', source_url: 'https://status.company.com', signal_strength: 'HIGH' as any }),
+      makeSignal({ signal_id: 'sig_cand_4', type: 'API_REFERENCE' as SignalSourceType, excerpt: 'database API migration notices', source_url: 'https://api.company.com', signal_strength: 'MEDIUM' as any }),
     ];
     const evidence = signals.map((s, i) => makeEvidence({ id: `ev-${i}`, observed_behavior: s.excerpt, public_url: s.source_url }));
 
@@ -382,8 +383,8 @@ async function runAll(): Promise<void> {
 
     // Unrelated signals
     const unrelated = SignalCorrelationEngine.correlate([
-      makeSignal({ signal_id: 'u1', type: 'BLOG' as SignalSourceType, excerpt: 'company culture', source_url: 'https://c.com/blog' }),
-      makeSignal({ signal_id: 'u2', type: 'TECHNICAL_HIRING' as SignalSourceType, excerpt: 'hiring sales reps', source_url: 'https://c.com/jobs' }),
+      makeSignal({ signal_id: 'sig_cand_u1', type: 'BLOG' as SignalSourceType, excerpt: 'company culture', source_url: 'https://c.com/blog' }),
+      makeSignal({ signal_id: 'sig_cand_u2', type: 'TECHNICAL_HIRING' as SignalSourceType, excerpt: 'hiring sales reps', source_url: 'https://c.com/jobs' }),
     ], []);
     assert(!unrelated.shouldDeepResearch, 'unrelated signals do not trigger deep research');
   }

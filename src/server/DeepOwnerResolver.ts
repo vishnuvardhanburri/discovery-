@@ -57,7 +57,7 @@ export class DeepOwnerResolver {
     // Confidence is HIGH here: the gate above rejects anything that is not
     // explicitly HIGH. LOW/MEDIUM candidates never reach this point and are
     // never promoted.
-    const confidence: OwnerConfidence = 'HIGH';
+    const confidence: string = 'HIGH';
 
     return {
       name: candidate.name,

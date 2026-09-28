@@ -12,13 +12,20 @@ import {
   CANDIDATE_ROLES,
   OwnerCandidate,
   DiscoveredPage,
-  StrengthLevel,
-  RawPerson,
-  ExtractionMethod
+  StrengthLevel
 } from './IntelligenceCase';
 
+/** A person extracted from public sources (before confidence scoring). */
+export interface RawPerson {
+  name: string;
+  role: string;
+  source_url: string;
+  evidence: string[];
+  extraction_method?: string;
+}
+
 const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
-  'use','case','docs','doc','dire','ve','re','demo','test','example','etc','page','pages',
+  'by','use','case','docs','doc','dire','ve','re','demo','test','example','etc','page','pages',
   'section','menu','button','buttons','icon','icons','avatar','avatars','user','users',
   'profile','profiles','navbar','header','footer','sidebar','modal','overlay','popup',
   'tooltip','badge','badges','close','open','saved','cancel','submit','reset','edit',
@@ -93,6 +100,16 @@ export interface PeopleExtractorOptions {
 }
 
 export class PeopleExtractor {
+  /** Instance method alias for extractPeopleFromHtml — used by TargetedDiscoveryEngine. */
+  extract(html: string): RawPerson[] {
+    return PeopleExtractor.extractPeopleFromHtml(html, '', undefined);
+  }
+
+  /** Instance method alias for targetedExtract — used by TargetedDiscoveryEngine. */
+  targetedExtract(html: string, keywords: string[]): RawPerson[] {
+    return PeopleExtractor.targetedExtract(html, keywords);
+  }
+
   static extractFromPages(pages: any[], htmlByUrl: Map<string, string>, options: PeopleExtractorOptions = {}): any[] {
     const candidates: any[] = [];
     const company = options.company ?? '';
@@ -198,22 +215,77 @@ export class PeopleExtractor {
   }
 
   static extractNameFromContext(context: string, role: string): string | undefined {
-    // Remove the matched role AND common expanded variants to prevent "Officer Jane Doe"
+    // The name typically PRECEDES the role in HTML (e.g. "Jane Doe Head of Engineering").
+    // Strategy: split context into structural segments by [BREAK], find the
+    // segment containing the role keyword, then look at adjacent segments for
+    // a valid name. This avoids picking up the NEXT person's name that
+    // appears after the role in the same context window.
     const roleVariants = [
       role,
       'Chief Technology Officer', 'Chief Product Officer',
-      'VP of Engineering', 'VP of Product',
+      'VP of Engineering', 'VP of Product', 'VP Engineering', 'VP Product',
       'Director of Engineering', 'Director of Platform', 'Director of Infrastructure',
-      'Head of Engineering', 'Head of Platform', 'Head of Infrastructure', 'Head of Security'
+      'Head of Engineering', 'Head of Platform', 'Head of Infrastructure', 'Head of Security',
+      'CTO', 'CPO', 'Staff Engineer', 'Principal Engineer', 'Engineering Manager',
+      'SRE Lead', 'Security Lead', 'Technical Founder', 'Co-Founder', 'CoFounder'
     ];
 
-    let cleanedContext = context;
-    for (const variant of roleVariants) {
-      cleanedContext = cleanedContext.replace(new RegExp(`\\b${variant}\\b`, 'gi'), ' ');
+    const tokens = context.split(/[\s,;\-]+/).map(t => t.trim()).filter(Boolean);
+
+    // Find the index of the role keyword in the token stream.
+    // Only search for the specific role passed in (not all variants),
+    // to avoid matching a different role that starts with the same word.
+    // Since roles may be normalized (e.g. "VP of Engineering" -> "VP Engineering"),
+    // we allow filler words ('of', 'the') to be skipped.
+    const roleTokens = role.toLowerCase().split(/\s+/).filter(Boolean);
+    let roleIdx = -1;
+    if (roleTokens.length > 0) {
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].toLowerCase() !== roleTokens[0]) continue;
+        let matchPos = 1;
+        for (let j = i + 1; j < tokens.length && matchPos < roleTokens.length; j++) {
+          if (tokens[j].toLowerCase() === roleTokens[matchPos]) {
+            matchPos++;
+          }
+        }
+        if (matchPos === roleTokens.length) {
+          roleIdx = i; break;
+        }
+      }
     }
 
-    const tokens = cleanedContext.split(/[\s,;\-]+|\[BREAK\]/).map(t => t.trim()).filter(Boolean);
-    return this.grabNameTokens(tokens);
+    if (roleIdx < 0) return undefined;
+
+    // Collect name tokens going backwards from just before the role.
+    // Skip [BREAK] tokens (structural boundaries) but allow crossing
+    // at most 1 [BREAK] to reach the name on the adjacent element.
+    // Punctuation-like delimiters (em-dashes, en-dashes, etc.) are also skipped.
+    const maxLookback = 12;
+    let breaksCrossed = 0;
+    const nameTokens: string[] = [];
+    for (let i = roleIdx - 1; i >= Math.max(0, roleIdx - maxLookback) && nameTokens.length < 4; i--) {
+      const t = tokens[i].replace(/[.,;:\-]/g, '');
+      if (!t) continue;
+      // Skip em-dashes, en-dashes, and other punctuation-only tokens
+      if (/^[—–−‐‑–]+$/.test(t)) continue;
+      if (t === '[BREAK]') {
+        breaksCrossed++;
+        if (breaksCrossed > 1) break;
+        continue;
+      }
+      const lowT = t.toLowerCase();
+      if (NON_NAME_TOKENS.has(lowT)) break;
+      if (!/^[A-Z][a-zA-ZÀ-ſ'-]+$/.test(t)) {
+        if (nameTokens.length >= 2) break;
+        break;
+      }
+      nameTokens.unshift(t);
+    }
+
+    if (nameTokens.length >= 2 && nameTokens.length <= 4) {
+      return nameTokens.join(' ');
+    }
+    return undefined;
   }
 
   static extractFromEmbeddedJson(html: string): RawPerson[] {
@@ -280,12 +352,20 @@ export class PeopleExtractor {
           if (item['@type'] === 'Person') {
             const name = item['name'];
             const role = item['jobTitle'] || item['position'];
-            if (name && role) {
+            const sameAs = item['sameAs'];
+            // Accept Person entries with name + (role OR sameAs/sameAs array).
+            // Many real company pages list people with name + social profile links
+            // but no explicit jobTitle — we accept these as potential candidates
+            // (the role is inferred from page context during confidence scoring).
+            const hasName = !!name;
+            const hasRole = !!role;
+            const hasSameAs = Array.isArray(sameAs) ? sameAs.length > 0 : !!sameAs;
+            if (hasName && (hasRole || hasSameAs)) {
               results.push({
                 name,
-                role,
+                role: role || (hasSameAs ? 'Technical team member' : ''),
                 source_url: '',
-                evidence: [`JSON-LD: ${name} is listed as ${role}`],
+                evidence: [`JSON-LD: ${name} is listed as ${role || 'team member'} on ${sameAs ? (Array.isArray(sameAs) ? sameAs.join(', ') : sameAs) : 'the company page'}`],
               });
             }
           } else if (item['@type'] === 'Organization' && item['employee']) {
@@ -313,7 +393,44 @@ export class PeopleExtractor {
   private static flattenJsonLd(json: any): any[] {
     if (Array.isArray(json)) return json;
     if (json['@graph'] && Array.isArray(json['@graph'])) return json['@graph'];
-    return [json];
+    // Recursively extract nested @type === 'Person' objects (e.g. Organization
+    // with a nested founder: { "@type": "Person", ... } or employee: [...]).
+    const items: any[] = [json];
+    this.extractNestedPersons(json, items);
+    return items;
+  }
+
+  /** Recursively find nested Person objects (founders, employees, team members). */
+  private static extractNestedPersons(obj: any, out: any[]): void {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) { for (const item of obj) this.extractNestedPersons(item, out); return; }
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (val && typeof val === 'object') {
+        if (val['@type'] === 'Person' && val['name']) {
+          // Infer role from the property name if jobTitle is absent.
+          const roleHint = this.roleFromProperty(key);
+          const item = { ...val };
+          if (roleHint && !item['jobTitle'] && !item['position']) {
+            item['jobTitle'] = roleHint;
+          }
+          out.push(item);
+        } else {
+          this.extractNestedPersons(val, out);
+        }
+      }
+    }
+  }
+
+  /** Infer a technical role from JSON-LD property context. */
+  private static roleFromProperty(key: string): string | undefined {
+    const k = key.toLowerCase();
+    if (k === 'founder' || k === 'founders') return 'Co-Founder';
+    if (k === 'ceo') return 'CEO';
+    if (k === 'cto') return 'CTO';
+    if (k === 'employee' || k === 'team') return 'Technical team member';
+    if (k === 'author') return undefined; // can't infer role from authorship alone
+    return undefined;
   }
 
   static targetedExtract(html: string, keywords: string[]): RawPerson[] {
@@ -354,7 +471,7 @@ export class PeopleExtractor {
   }
 
   static isCandidateRole(role: string): boolean {
-    return (CANDIDATE_ROLES as any).some(r => r.toLowerCase() === role.toLowerCase());
+    return CANDIDATE_ROLES.some((r: string) => r.toLowerCase() === role.toLowerCase());
   }
 
   static matchRoleKeyword(text: string): string | undefined {
@@ -425,6 +542,14 @@ export class PeopleExtractor {
     for (let i = tokens.length - 1; i >= 0; i--) {
       const t = tokens[i].replace(/[.,;:\-]/g, '');
       if (!t) continue;
+
+      // [BREAK] is an HTML structural boundary — do not cross it when
+      // collecting name tokens. This prevents "Doe Jane" from being
+      // assembled when two people appear in the same context window.
+      if (t === '[BREAK]') break;
+
+      // Skip em-dashes, en-dashes, and other punctuation-only tokens
+      if (/^[—–−‐‑–]+$/.test(t)) continue;
 
       const lowT = t.toLowerCase();
       if (NON_NAME_TOKENS.has(lowT)) {
@@ -528,7 +653,7 @@ export class PeopleExtractor {
     return html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ');
   }
 
-  static textLines(html: string): string {
+  static textLines(html: string): string[] {
     const block = html.replace(/<\/(p|div|li|h1|h2|h3|h4|h5|h6|section|article|tr)[^>]*>/gi, '\n');
     const noTags = block.replace(/<[^>]+>/g, ' ');
     return noTags.split(/\n+/).map(s => s.trim()).filter(s => s.length > 3);
@@ -564,17 +689,24 @@ export class PeopleExtractor {
       const text = e.toLowerCase();
       const nameIdx = text.indexOf(nameHead);
       if (nameIdx === -1) return false;
-      const roleKwNorm = this.matchRoleKeyword(e);
-      if (!roleKwNorm) return false;
-      const roleLower = roleKwNorm.toLowerCase();
-      let roleIdx = text.indexOf(roleLower);
+
+      // Check if THIS person's specific role co-occurs with the name.
+      const rawRoleLower = raw.role.toLowerCase();
+      let roleIdx = text.indexOf(rawRoleLower);
+      let roleLen = rawRoleLower.length;
+
+      // If the exact role string isn't found (e.g. role was normalised by
+      // matchRoleKeyword to "VP Engineering" but the text has "VP of Engineering"),
+      // try matching against candidate role variants.
       if (roleIdx === -1) {
         const rawMatch = CANDIDATE_ROLES.find(r => text.includes(r.toLowerCase()));
         if (!rawMatch) return false;
         roleIdx = text.indexOf(rawMatch.toLowerCase());
+        roleLen = rawMatch.toLowerCase().length;
       }
+
       const lo = Math.min(nameIdx, roleIdx);
-      const hi = Math.max(nameIdx, roleIdx) + (roleIdx >= 0 ? roleLower.length : 0);
+      const hi = Math.max(nameIdx, roleIdx) + roleLen;
       const between = text.slice(lo, hi).split(/\s+/).filter(Boolean);
       return between.length <= 12;
     });
@@ -585,13 +717,24 @@ export class PeopleExtractor {
     return name.trim().replace(/\s+/g, ' ');
   }
 
+  static inferCompanyFromUrl(url: string): string {
+    try {
+      const u = new URL(url);
+      return u.hostname.replace(/^www\./, '');
+    } catch {
+      return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    }
+  }
+
   static dedupe(candidates: any[]): any[] {
     const best = new Map<string, any>();
-    const rank = { LOW: 0, MEDIUM: 1, HIGH: 2, NOT_APPLICABLE: 0 };
+    const rank: Record<string, number> = { LOW: 0, MEDIUM: 1, HIGH: 2, NOT_APPLICABLE: 0 };
     for (const c of candidates) {
       const key = `${c.name.toLowerCase()}|${c.role.toLowerCase()}`;
       const existing = best.get(key);
-      if (!existing || rank[c.confidence] > rank[existing.confidence]) {
+      const cRank = rank[c.confidence as string] ?? 0;
+      const eRank = existing ? (rank[existing.confidence as string] ?? 0) : 0;
+      if (!existing || cRank > eRank) {
         best.set(key, c);
       }
     }

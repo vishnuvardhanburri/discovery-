@@ -215,15 +215,19 @@ export class DeepEmailGenerator {
     const displaySrc = evidenceUrl || prospect.public_surface?.homepage || hostname;
     const surface = path && path !== '/' ? path : 'public surface';
 
-    // --- Subjects (finding-led: "Possible … in the …" / "Observed … on …") ---
+    // --- Subjects (finding-led: "Observed … on …" / "Documented … on …") ---
     let primary_subject: string;
     let alternate_subject: string;
     if (finding && finding.finding_type.startsWith('OBSERVED_')) {
       const detail = finding.finding_type.replace(/^OBSERVED_/, '').replace(/_/g, ' ').toLowerCase();
       primary_subject = `Observed ${detail} on ${hostname}`;
       alternate_subject = `Quick technical note on ${hostname}`;
+    } else if (finding && finding.finding_type.startsWith('DOCUMENTED_')) {
+      const detail = finding.finding_type.replace(/^DOCUMENTED_/, '').replace(/_/g, ' ').toLowerCase();
+      primary_subject = `Noting ${detail} on ${hostname}`;
+      alternate_subject = `Documented ${detail} at ${hostname}`;
     } else if (finding) {
-      const detail = finding.finding_type.replace(/^POSSIBLE_|^DOCUMENTED_/, '').replace(/_/g, ' ').toLowerCase();
+      const detail = finding.finding_type.replace(/^POSSIBLE_/, '').replace(/_/g, ' ').toLowerCase();
       primary_subject = `Possible ${detail} in the ${surface}`;
       alternate_subject = `Technical note regarding ${detail} at ${hostname}`;
     } else {

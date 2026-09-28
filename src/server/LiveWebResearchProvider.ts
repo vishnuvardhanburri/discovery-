@@ -17,7 +17,7 @@ import { ResearchBudget } from './ResearchBudget';
 import type { ResearchStage } from './ResearchBudget';
 import { PublicLinkDiscovery } from './PublicLinkDiscovery';
 import { PeopleExtractor } from './PeopleExtractor';
-import type { OwnerCandidate, DiscoveredPage } from './IntelligenceCase';
+import type { OwnerCandidate, DiscoveredPage, CompanySurface } from './IntelligenceCase';
 import { GitHubDiscovery } from './GitHubDiscovery';
 import type { GithubRepoMeta } from './DeepTypes';
 import { randomBytes } from 'crypto';
@@ -55,9 +55,13 @@ export class LiveWebResearchProvider {
   private readonly cache = new SearchCache();
   private readonly budget: ResearchBudget;
 
-  constructor() {
-    this.fetcher = ((url: string, init: { method: string; headers: Record<string, string>; signal: AbortSignal }) =>
-      fetch(url, { method: init.method, headers: init.headers, signal: init.signal })) as HttpFetcher;
+  constructor(fetcher?: HttpFetcher) {
+    if (fetcher) {
+      this.fetcher = fetcher;
+    } else {
+      this.fetcher = ((url: string, init: { method: string; headers: Record<string, string>; signal: AbortSignal }) =>
+        fetch(url, { method: init.method, headers: init.headers, signal: init.signal })) as HttpFetcher;
+    }
     this.budget = new ResearchBudget();
   }
 
@@ -85,27 +89,20 @@ export class LiveWebResearchProvider {
   }
 
   async getGithubRepos(org: string, keywords: string[]): Promise<GithubRepoMeta[]> {
-    // Mock implementation for pipeline validation
-    return [{
-      org,
-      repo: 'core-infra',
-      url: `https://github.com/${org}/core-infra`,
-      description: 'Core infrastructure and scaling',
-      language: 'typescript',
-      stars: 100,
-      updated_at: new Date().toISOString()
-    }];
+    // GitHub API calls should go through GitHubProvider with rate-limit awareness.
+    // Return empty — real GitHub discovery is handled by GitHubProvider in the
+    // free-first architecture.
+    return [];
   }
 
   async getRepoContributors(org: string, repo: string): Promise<{ login: string; name?: string }[]> {
-    return [{ login: 'tech_lead_1', name: 'Technical Lead' }];
+    // GitHub API calls should go through GitHubProvider. Return empty.
+    return [];
   }
 
   async fetchGithubProfile(login: string): Promise<{ bio: string; url: string } | null> {
-    return {
-      bio: 'Staff Engineer at Xavira. Expert in kubernetes and sharding.',
-      url: `https://github.com/${login}`
-    };
+    // GitHub API calls should go through GitHubProvider. Return null.
+    return null;
   }
 
   // --- Core research logic ---
@@ -127,6 +124,9 @@ export class LiveWebResearchProvider {
       searchProvider = new NullSearchProvider();
     }
     const searchAvailable = searchProvider.available;
+    if (!searchAvailable) {
+      errors.push('SEARCH_UNAVAILABLE: No search provider available in FREE_ONLY mode — continuing with public web sources only.');
+    }
 
     if (this.budget.shouldAttemptStage(2)) {
       onProgress('sources', `Stage 2: Public source discovery for ${context.domain}`);
@@ -413,5 +413,36 @@ export class LiveWebResearchProvider {
     if (hostname.includes('linkedin.com')) return 'team_people';
     if (hostname.includes('medium.com') || hostname.includes('dev.to') || hostname.includes('blog')) return 'blog';
     return 'other';
+  }
+}
+
+/** Record read-only observation evidence from a discovered surface. */
+function auditEvidenceFromSurface(
+  surface: CompanySurface,
+  evidence: Evidence[],
+  errors: string[],
+): void {
+  const now = new Date().toISOString();
+  const notTested = ['mutations', 'auth bypass', 'brute force', 'exploitation'];
+
+  for (const page of surface.discovered_pages) {
+    if (page.status && page.status >= 200 && page.status < 300) {
+      evidence.push({
+        id: 'ev_live_' + randomBytes(8).toString('hex'),
+        evidence_origin: 'REAL_PUBLIC_OBSERVATION',
+        public_url: page.url,
+        source_type: 'PUBLIC_DOCUMENTATION',
+        method: 'GET',
+        status: page.status,
+        observed_behavior: `Public page observed: ${page.title || page.path} (HTTP ${page.status})`,
+        reproductions: 1,
+        repeatable: true,
+        tested_without_auth: true,
+        not_tested: notTested,
+        retrieved_at: now,
+        evidence_text: `${page.title || page.category} page at ${page.url}`,
+        latency_ms: 0,
+      });
+    }
   }
 }

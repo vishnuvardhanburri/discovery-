@@ -112,7 +112,7 @@ async function runProductionTest() {
     let ownerResult = 'NOT_JUSTIFIED';
     let resolvedOwner = null;
     if (finalCase.pressure_classification && finalCase.pressure_classification !== 'UNKNOWN') {
-      const candidates = PersonDiscoveryEngine.discover({
+      const candidates = await PersonDiscoveryEngine.discover({
         company: finalCase.company,
         domain: finalCase.company_surface?.origin || '',
         technicalArea: finalCase.pressure_classification,

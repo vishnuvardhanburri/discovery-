@@ -19,6 +19,7 @@ import fs from 'fs';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
 import { PublicLinkDiscovery, categorizeProfessionalPath } from './PublicLinkDiscovery';
+import { subsystemFromFinding } from './DeepOwnerResolver';
 import { PeopleExtractor } from './PeopleExtractor';
 import type {
   DeepBuilderOptions, DeepBuilderResult, DeepProspect, DeepSignal,
@@ -31,6 +32,7 @@ import type {
 } from './IntelligenceCase';
 import { DeepSignalExtractor } from './DeepSignalExtractor';
 import { ContactabilityFinder } from './ContactabilityFinder';
+import { OwnerSelector } from './OwnerSelector';
 import { OwnerPipeline } from './OwnerPipeline';
 import { PersonDiscoveryEngine } from './PersonDiscoveryEngine';
 import { GitHubDiscovery } from './GitHubDiscovery';
@@ -313,7 +315,29 @@ export class DeepProspectBuilder {
     );
     this.onProgress?.('people', `${pagesForPeople.length} professional page(s) for person discovery.`);
 
-    const people = PersonDiscoveryEngine.discover({
+    // 4b) GITHUB DISCOVERY — find company-linked repos + contributor identities.
+    //     This feeds person discovery from public GitHub contributor graphs.
+    this.onProgress?.('people', 'Discovering public GitHub repos for company...');
+    let reposForPeople: GithubRepoMeta[] = [];
+    try {
+      const ghDiscoveryOpts = {
+        fetcher: this.fetcher as any,
+        pages: surface.discovered_pages.map(p => ({ url: p.url, html: htmlByUrl.get(p.url) || '' })),
+        crawlPaths: ['/about', '/team', '/contact', '/company'],
+        companyDomain: parsed.hostname,
+        onProgress: (stage: string, msg: string) => this.onProgress?.('people', msg),
+      };
+      const ghResult = await GitHubDiscovery.discover(ghDiscoveryOpts);
+      reposForPeople = ghResult.repos;
+      this.onProgress?.('people', `GitHub discovery: ${reposForPeople.length} repo(s) found${ghResult.rate_limited ? ' (RATE_LIMITED)' : ''}.`);
+      for (const r of reposForPeople) {
+        this.onProgress?.('people', `  [github] ${r.org}/${r.repo} — ${r.stars ?? 0}★  ${r.description || ''}`);
+      }
+    } catch (e: any) {
+      this.onProgress?.('people', `GitHub discovery error: ${e?.message || String(e)}`);
+    }
+
+    const people = await PersonDiscoveryEngine.discover({
       company: surface.company,
       domain: parsed.hostname,
       technicalArea,
@@ -324,7 +348,8 @@ export class DeepProspectBuilder {
       }] as any : []),
       pages: pagesForPeople,
       htmlByUrl,
-      githubRepos: undefined, // filled after GitHubDiscovery runs below
+      githubRepos: reposForPeople,
+      fetcher: this.fetcher as any,
       onProgress: (stage, message) => this.onProgress?.('people', message),
     });
     this.onProgress?.('people', `${people.length} owner candidate(s) discovered (provider-agnostic).`);
@@ -339,20 +364,56 @@ export class DeepProspectBuilder {
     // never promote LOW/MEDIUM. Public candidates from PeopleExtractor provide
     // optional corroboration (a Growjo-identified person need NOT appear on the
     // company's own team/leadership page).
-    const opPipeline = new OwnerPipeline(
-      new LiveWebResearchProvider(),
-      new PeopleExtractor()
-    );
-
-    // Fix: Move Owner Resolution AFTER IntelligenceEngine.run (which creates caseRef)
-    // The previous code had it at line 342, but caseRef was created at line 368.
-    // I will move this entire block below the caseRef creation.
-
-    // (I will now perform a larger edit to move the block)
-
+    // 5) OWNER RESOLUTION — select from pre-discovered public candidates.
+    // PersonDiscoveryEngine already discovered people from ALL sources
+    // (provider data, public professional pages, GitHub identities).
+    // Use OwnerSelector to pick the best HIGH-confidence candidate.
+    // Optional: OwnerPipeline can enhance with targeted discovery (live-web),
+    // but the pipeline must still operate if it fails or is unavailable.
     let selectedOwner: DeepOwner | null = null;
     let sel = { candidate: null as any, ownerEvidenceString: '', reason: '' };
     let op: any = { candidates: [], provenance: 'NONE' };
+
+    // Select from pre-discovered candidates first
+    const ownerSel = OwnerSelector.select(people, technicalArea);
+    if (ownerSel.candidate) {
+      // Determine provenance from the candidate's evidence tags
+      const evidenceText = (ownerSel.candidate.evidence || []).join(' ');
+      const provenanceTag = evidenceText.includes('GROWJO_IDENTITY') ? 'GROWJO_SOURCE' : 'PUBLIC_SOURCE';
+      // finding_link: derive from finding subsystem (not technicalAreaFromSurface),
+      // consistent with DeepOwnerResolver — defaults to 'platform engineering'
+      // when no classification/evidence is available yet.
+      const findingLink = subsystemFromFinding(null, []);
+      selectedOwner = {
+        ...ownerSel.candidate,
+        confidence: ownerSel.candidate.confidence,
+        owner_evidence: ownerSel.candidate.evidence || [],
+        responsibility_match: ownerSel.candidate.relationship_to_area,
+        finding_link: findingLink,
+        deep_owner_provenance: provenanceTag,
+      } as any;
+      sel = {
+        candidate: ownerSel.candidate,
+        ownerEvidenceString: ownerSel.ownerEvidenceString,
+        reason: ownerSel.reason,
+      };
+      op = {
+        candidates: people,
+        provenance: provenanceTag,
+        candidate: ownerSel.candidate,
+        ownerEvidenceString: ownerSel.ownerEvidenceString,
+        reason: ownerSel.reason,
+      };
+    }
+
+    // Optional: targeted owner discovery via OwnerPipeline (free-first, live-web aware).
+    // This is best-effort: if it fails, we keep the pre-discovered candidates.
+    // We need caseRef for finding_classification and evidence, so we do a brief
+    // inline IntelligenceEngine run first if needed. For now, the OwnerPipeline
+    // enhance is optional and the pre-discovered candidates are the primary source.
+    // The IntelligenceEngine.run() call below will have the owner info available.
+    // The targeted discovery enhancement is deferred to after caseRef is available.
+
     this.onProgress?.('owners', selectedOwner
       ? `Selected owner: ${selectedOwner.name} (${selectedOwner.role}) — ${selectedOwner.confidence} (responsibility: ${selectedOwner.finding_link}, provenance: ${op.provenance}).`
       : 'Owner graph: no evidence-backed owner discovered.');
@@ -369,9 +430,9 @@ export class DeepProspectBuilder {
       caseRef = await IntelligenceEngine.run(
         surface.company,
         surface.homepage,
-        '',
-        '',
-        '',
+        sel.candidate?.name || '',
+        sel.candidate?.role || '',
+        sel.ownerEvidenceString,
         [],
         'PRODUCTION',
         undefined,
@@ -388,27 +449,45 @@ export class DeepProspectBuilder {
       return this.failProspect(parsed, htmlByUrl, auditTrail, `Pipeline error: ${e?.message || String(e)}`);
     }
 
-    // NOW perform owner resolution with the finalized IntelligenceCase
-    const resolution = await opPipeline.resolve(
-      caseRef.case_id,
-      caseRef.finding_classification,
-      caseRef.evidence
-    );
-    selectedOwner = resolution.primary_candidate;
-    op = {
-      candidates: resolution.candidates,
-      provenance: resolution.verification_state,
-      candidate: resolution.primary_candidate,
-      ownerEvidenceString: resolution.candidates.length > 0 ? 'Corroborated via targeted discovery' : '',
-      reason: resolution.verification_state
-    };
-    sel = {
-      candidate: resolution.primary_candidate,
-      ownerEvidenceString: op.ownerEvidenceString,
-      reason: op.reason
-    };
+    // Enhance owner resolution with targeted discovery (best-effort, free-first)
+    try {
+      const opPipeline = new OwnerPipeline(
+        new LiveWebResearchProvider(this.fetcher),
+        new PeopleExtractor()
+      );
+      const resolution = await opPipeline.resolve(
+        parsed.hostname,
+        caseRef.finding_classification ?? null,
+        caseRef.evidence
+      );
+      if (resolution.primary_candidate && (!selectedOwner || resolution.primary_candidate.confidence === 'HIGH')) {
+        selectedOwner = { ...resolution.primary_candidate } as any;
+        op = {
+          candidates: resolution.candidates,
+          provenance: resolution.verification_state,
+          candidate: resolution.primary_candidate,
+          ownerEvidenceString: resolution.candidates.length > 0 ? `Corroborated via targeted discovery (${resolution.verification_state})` : '',
+          reason: resolution.verification_state,
+        };
+        sel = {
+          candidate: resolution.primary_candidate,
+          ownerEvidenceString: op.ownerEvidenceString,
+          reason: op.reason,
+        };
+      }
+    } catch (e: any) {
+      this.onProgress?.('owners', `Targeted owner discovery skipped (${e?.message || String(e)}). Using pre-discovered candidates.`);
+    }
+    // Sync owner confidence from the IntelligenceEngine's verification.
+    // The engine checks for "is listed as" in the owner evidence string
+    // (produced by OwnerSelector) and upgrades confidence to HIGH.
+    if (caseRef.technical_owner && caseRef.technical_owner.owner_confidence === 'HIGH' && selectedOwner) {
+      selectedOwner = { ...selectedOwner, confidence: 'HIGH' } as any;
+      this.onProgress?.('owners', `Owner confidence synced from engine verification: HIGH.`);
+    }
     auditTrail.push(`Engine decision: ${caseRef.prospect_decision}; finding: ${caseRef.finding_classification?.finding_type || 'NONE'}`);
     this.onProgress?.('findings', `finding: ${caseRef.finding_classification?.finding_type || 'NONE'} (${caseRef.finding_classification?.impact_severity || 'UNKNOWN'}); decision: ${caseRef.prospect_decision}`);
+    this.onProgress?.('owners', `Owner: ${selectedOwner?.name || 'none'} — ${selectedOwner?.confidence || 'unknown'} (engine: ${caseRef.technical_owner?.owner_confidence || 'N/A'}, role: ${caseRef.technical_owner?.role || 'N/A'}).`);
 
     // Backfill signal → observation evidence links (by URL).
     const evByUrl = new Map<string, string[]>();
@@ -433,6 +512,10 @@ export class DeepProspectBuilder {
       this.onProgress?.('findings', `deep finding: ${deepFinding.finding_type} (${deepFinding.confidence}) — ${deepFinding.explanation.slice(0, 90)}`);
     } else {
       this.onProgress?.('findings', 'No defensible deep finding assembled (not fabricated).');
+      // Debug: dump signal types for diagnosis
+      for (const sig of signals) {
+        this.onProgress?.('findings', `  [signal] ${sig.type} (${sig.signal_strength}) — "${sig.excerpt.slice(0, 100)}"`);
+      }
     }
 
     // 7) CONTACTABILITY (public professional contact channels only)
@@ -489,18 +572,20 @@ export class DeepProspectBuilder {
 
     // Broad GitHub discovery: only orgs/repos linked from the company's own pages.
     const githubPages = Array.from(htmlByUrl.entries()).map(([url, html]) => ({ url, html }));
-    let githubRepos: GithubRepoMeta[] = [];
-    try {
-      const gh = await GitHubDiscovery.discover({
-        fetcher: this.fetcher || (globalThis.fetch as any),
-        pages: githubPages,
-        companyDomain: parsed.hostname,
-        onProgress: (stage, msg) => this.onProgress?.('engineering', msg),
-      });
-      githubRepos = gh.repos;
-      if (gh.rate_limited) auditTrail.push('GitHub API rate-limited during discovery.');
-    } catch (e: any) {
-      auditTrail.push(`GitHub discovery error: ${e?.message || String(e)}`);
+    let githubRepos: GithubRepoMeta[] = reposForPeople;
+    if (githubRepos.length === 0) {
+      try {
+        const gh = await GitHubDiscovery.discover({
+          fetcher: this.fetcher || (globalThis.fetch as any),
+          pages: githubPages,
+          companyDomain: parsed.hostname,
+          onProgress: (stage, msg) => this.onProgress?.('engineering', msg),
+        });
+        githubRepos = gh.repos;
+        if (gh.rate_limited) auditTrail.push('GitHub API rate-limited during discovery.');
+      } catch (e: any) {
+        auditTrail.push(`GitHub discovery error: ${e?.message || String(e)}`);
+      }
     }
 
     // Activity timeline: signals + evidence + GitHub, provenance-tracked.
@@ -717,6 +802,31 @@ export class DeepProspectBuilder {
         }
       } catch { /* ignore malformed JSON-LD */ }
     }
+
+    // ── Explicit professional-path crawl ──
+    // The broad crawler above follows links from the homepage, but many companies
+    // don't link to their /about, /team, or /careers pages from the homepage
+    // (especially React SPAs). These paths are standard locations for team/person
+    // data and MUST be fetched so PeopleExtractor has a chance to find people.
+    // This is read-only and bounded: only 4 high-signal paths, no recursion.
+    const professionalPaths = ['/about', '/team', '/leadership', '/careers'];
+    for (const ppath of professionalPaths) {
+      const url = origin + ppath;
+      if (htmlByUrl.has(url) || htmlByUrl.has(url.replace(/\/$/, ''))) continue;
+      try {
+        const r = await fetcher(url, {
+          method: 'GET',
+          headers: { 'User-Agent': 'XAVIRA-FREE-FIRST/1.0', 'Accept': 'text/html' },
+          signal: AbortSignal.timeout(6000),
+        });
+        if (r && r.ok) {
+          const h = await r.text();
+          const u = new URL(url);
+          addPage(url, h, categorizeProfessionalPath(u.pathname));
+          this.onProgress?.('surface', `[broaden] explicit fetch ${u.pathname} → HTTP ${r.status}`);
+        }
+      } catch { /* skip — 404 or network */ }
+    }
   }
 
   /**
@@ -750,6 +860,23 @@ export class DeepProspectBuilder {
         'Treat the field as intentionally public only if it is part of the product data model; otherwise remove it.',
         sensitive.length >= 2 ? 'HIGH' : 'MEDIUM',
         sensitive.length >= 2 ? 'MEDIUM' : 'LOW', 'HIGH', 'HIGH', 'MEDIUM', 'MEDIUM'
+      ));
+    }
+
+    // Documented security posture (compliance certifications on a security page).
+    const securitySig = signals.find(s =>
+      s.type === 'SECURITY_PAGE' &&
+      /iso\s*27001|soc\s*2|pci\s*dss|hipaa|gdpr|fedramp|nist|iso\s*27001/i.test(s.excerpt)
+    );
+    if (securitySig) {
+      found.push(this.deepFinding(
+        'DOCUMENTED_SECURITY_POSTURE', 'MEDIUM',
+        `Public security/compliance page documents certifications on ${securitySig.source_url}.`,
+        this.sigEvidence(securitySig, src),
+        this.signalUrls(securitySig),
+        `The company's public security page documents compliance certifications (${securitySig.excerpt.slice(0, 120)}). This is a published technical posture statement, not a vulnerability claim.`,
+        'Verify the certifications are current before referencing; treat as organizational security context.',
+        'MEDIUM', 'MEDIUM', 'HIGH', 'MEDIUM', 'HIGH', 'MEDIUM'
       ));
     }
 

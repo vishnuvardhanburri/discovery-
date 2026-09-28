@@ -348,7 +348,7 @@ console.log('\n--- POSITIVE: DOCUMENTED finding -> safe verify statement ("where
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(draft.generated === true, 'DOCUMENTED finding -> generated');
-  assert(/^Possible /.test(draft.primary_subject), 'subject is "Possible … in the …"');
+  assert(/^Noting /.test(draft.primary_subject), 'subject is "Noting … on …"');
   assert(/I was able to verify this specific observation .+ where applicable\./.test(draft.body), 'non-reproducible -> safe verify statement');
 }
 

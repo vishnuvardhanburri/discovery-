@@ -128,7 +128,7 @@ export class ProductionAcceptanceTest {
   }
 
   private async resolveOwner(currentCase: IntelligenceCase) {
-    const candidates = PersonDiscoveryEngine.discover({
+    const candidates = await PersonDiscoveryEngine.discover({
       company: currentCase.company,
       domain: currentCase.company_surface?.origin || '',
       technicalArea: currentCase.pressure_classification || 'INFRASTRUCTURE',

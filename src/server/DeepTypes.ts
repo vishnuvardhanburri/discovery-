@@ -169,7 +169,7 @@ export interface DeepOwner {
   owner_evidence: string[];
   /** Which responsibility area of the finding this owner covers. */
   responsibility_match: string;
-  confidence: OwnerConfidence;
+  confidence: string;
   /** The subsystem/topic of the finding this owner is responsible for. */
   finding_link?: string;
   /** Primary provenance layer that produced this owner (Growjo is primary). */
