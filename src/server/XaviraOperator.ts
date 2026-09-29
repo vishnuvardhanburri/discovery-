@@ -294,7 +294,7 @@ export class XaviraOperator {
     this.println(`Owner:          ${caseResult.technical_owner?.name || '(none)'} [${caseResult.technical_owner?.owner_confidence || 'LOW'}]`);
     this.println(`Evidence count: ${caseResult.evidence.length}`);
     this.println(`Artifact:       ${this.artifactPath}`);
-    this.println('\nCommands: status | show findings | show evidence | show people | why owner | draft email | export | help | exit\n');
+    this.println('\nCommands: status | show findings | show opportunity | show evidence | show people | why owner | draft email | export | help | exit\n');
     return caseResult;
   }
 
@@ -400,6 +400,7 @@ export class XaviraOperator {
     if (this.currentDeep) {
       if (sub.startsWith('findings')) { this.cmdShowDeepFindings(); return; }
       if (sub.startsWith('people')) { this.cmdShowDeepPeople(); return; }
+      if (sub.startsWith('opportunity') || sub.startsWith('diagnostic') || sub.startsWith('card')) { this.cmdShowDiagnosticOpportunity(); return; }
     }
 
     if (!this.currentCase) { this.println('No active research. Run "research <url>" first.'); return; }
@@ -456,7 +457,7 @@ export class XaviraOperator {
 
     if (sub.startsWith('people')) { this.cmdShowPeople(); return; }
 
-    this.println(`Unknown "show" subcommand. Use: show findings | show evidence | show people | show all`);
+    this.println(`Unknown "show" subcommand. Use: show findings | show opportunity | show evidence | show people | show all`);
   }
 
   cmdShowPeople(): void {
@@ -571,6 +572,72 @@ export class XaviraOperator {
       for (const ev of o.owner_evidence) this.println(`    • ${ev.slice(0, 200)}`);
     } else {
       this.println(`  (no evidence-backed owner — confidence LOW)`);
+    }
+  }
+
+  /** Deep-path: show the commercial diagnostic opportunity card. */
+  private cmdShowDiagnosticOpportunity(): void {
+    const p = this.currentDeep!;
+    this.println(`\n=== DIAGNOSTIC OPPORTUNITY ===`);
+    this.println(`Company:             ${p.company}`);
+    this.println(`Domain:              ${p.domain}`);
+    this.println(`Decision:            ${p.decision} (confidence ${p.confidence})`);
+    this.println(`Finding:             ${p.deep_finding?.finding_type || p.findings?.finding_type || 'NONE'}`);
+
+    const dobj = p.diagnostic_opportunity;
+    if (dobj) {
+      this.println(`\nProblem:              ${dobj.problem}`);
+      this.println(`Problem type:        ${dobj.problem_type}`);
+      this.println(`Technical area:      ${dobj.technical_area}`);
+      this.println(`Primary sources:     ${dobj.primary_sources.length ? dobj.primary_sources.join(', ') : '(self)'}`);
+      this.println(`Supporting sources:  ${dobj.supporting_sources.length ? dobj.supporting_sources.join(', ') : '(none)'}`);
+      this.println(`Commercial relevance: ${dobj.commercial_relevance}`);
+      this.println(`Confidence:          ${dobj.confidence}`);
+      this.println(`Why it matters:      ${dobj.why_it_matters}`);
+      this.println(`\nDiagnostic questions (${dobj.diagnostic_questions.length}):`);
+      dobj.diagnostic_questions.forEach((q, i) => this.println(`  ${i + 1}. ${q}`));
+      this.println(`\nRecommendation scope:`);
+      dobj.diagnostic_scope.forEach(s => this.println(`  • ${s}`));
+      this.println(`\nEvidence IDs:`);
+      dobj.evidence_ids.forEach(id => this.println(`  • ${id}`));
+    } else {
+      this.println(`\n(No diagnostic opportunity assembled — finding not defensible or no evidence.)`);
+    }
+
+    // Outreach card (person/email optional)
+    const card = p.outreach_card;
+    if (card) {
+      this.println(`\n=== OUTREACH CARD (problem-first) ===`);
+      this.println(`Company:              ${card.company}`);
+      this.println(`Company URL:          ${card.company_url}`);
+      this.println(`Technical problem:    ${card.problem}`);
+      this.println(`Finding type:        ${card.finding_type}`);
+      this.println(`Primary source:      ${card.primary_source}`);
+      this.println(`Supporting sources:  ${card.supporting_sources?.join(', ') || '(none)'}`);
+      this.println(`Technical area:      ${card.technical_area}`);
+      this.println(`Recommended role:    ${card.recommended_responsibility}`);
+      this.println(`Role search hints:   ${card.role_search_hints?.join(', ') || '(none)'}`);
+      this.println(`Why this person:     ${card.why_this_person || '(not available)'}`);
+      this.println(`Diagnostic angle:    ${card.diagnostic_angle}`);
+      this.println(`Confidence:          ${card.confidence}`);
+      this.println(`Next action:         ${card.next_action}`);
+      if (card.person && card.contact) {
+        this.println(`Contact:             ${card.person} (${card.role}) — email: ${card.email || card.contact}`);
+      } else {
+        this.println(`Contact:             (no verified person found — contact handled manually)`);
+      }
+    }
+
+    // Email draft status
+    const ed = p.email_draft;
+    if (ed) {
+      if (ed.generated && ed.body) {
+        this.println(`\n=== EMAIL DRAFT (generated) ===`);
+        this.println(ed.body);
+      } else {
+        this.println(`\n=== EMAIL ===`);
+        this.println(`Blocked: ${ed.blocked_reason || 'no owner-verified email; contact handled manually'}`);
+      }
     }
   }
 
@@ -1103,7 +1170,7 @@ export class XaviraOperator {
     this.println(`Finding:         ${prospect.findings ? prospect.findings.finding_type : 'NONE'}`);
     this.println(`Email draft:     ${prospect.email_draft.generated ? 'YES' : 'NO — ' + (prospect.email_draft.blocked_reason || '')}`);
     this.println(`Artifact:        ${prospect.artifact_path}`);
-    this.println(`Stages: status | show findings | show evidence | show people | show all | why owner | draft email | deep prospects | help | exit\n`);
+    this.println(`Stages: status | show findings | show opportunity | show evidence | show people | show all | why owner | draft email | deep prospects | help | exit\n`);
   }
 
   private async cmdDeepFile(csvPath: string): Promise<void> {

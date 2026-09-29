@@ -21,10 +21,13 @@ export function subsystemFromFinding(
 ): string {
   const ft = classification?.finding_type || '';
   if (ft === 'OBSERVED_AVAILABILITY_ISSUE' || ft === 'REPEATED_ERRORS' || ft === 'OBSERVED_LATENCY') return 'availability & performance';
-  if (ft.startsWith('DOCUMENTED_INCIDENT')) return 'reliability & observability';
+  if (ft === 'DOCUMENTED_INCIDENT') return 'reliability & observability';
+  if (ft === 'DOCUMENTED_ENGINEERING_FAILURE') return 'reliability & observability';
   if (ft === 'POSSIBLE_PUBLIC_EXPOSURE' || ft === 'POSSIBLE_SENSITIVE_METADATA_EXPOSURE' || ft === 'POSSIBLE_INFORMATION_DISCLOSURE') return 'public API surface';
+  if (ft === 'POSSIBLE_ACCESS_ISSUE') return 'security & auth';
+  if (ft === 'DOCUMENTED_SECURITY_POSTURE') return 'security & compliance';
   if (resolvedEvidence.some(e => (e.sensitive_fields || []).some(f => /security|token|credential|key/i.test(f)))) return 'security & auth';
-  if (ft.startsWith('DOCUMENTED_SCALING_CONSTRAINT') || ft === 'DOCUMENTED_ENGINEERING_FAILURE') return 'platform engineering';
+  if (ft === 'DOCUMENTED_SCALING_CONSTRAINT') return 'platform engineering';
   return 'platform engineering';
 }
 
@@ -86,7 +89,13 @@ export class DeepOwnerResolver {
    */
   static buildEvidenceString(candidate: OwnerCandidate): string {
     const url = candidate.source_urls?.[0] || '';
-    const excerpt = candidate.evidence?.[0] || '';
+    // Clean internal [BREAK] structural tokens from the verbatim excerpt so
+    // the evidence string is readable (not a wall of [BREAK] markers).
+    const rawExcerpt = candidate.evidence?.[0] || '';
+    const excerpt = rawExcerpt
+      .replace(/\s*\[BREAK\]\s*/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     return `${candidate.name} is listed as ${candidate.role} on ${url} — "${excerpt}"`;
   }
 }

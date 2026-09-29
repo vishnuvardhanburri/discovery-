@@ -66,7 +66,7 @@ const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
   'sidebar','modal','overlay','popup','tooltip','badge','close','open','cancel','submit',
   'reset','edit','view','click','hover','select','search','signin','signup','login','logout',
   'sign','free','try','learn','contact','about','help','faq','blog','press','careers',
-  'pricing','enterprise','business','partner','solutions','services','customer','database',
+  'pricing','enterprise','business','partner','partners','solutions','services','customer','database',
   'product','platform','engineering','company','team','staff','member','employee','analytics',
   'settings','account','billing','dashboard','workspace','project','admin','sales','support',
   'info','resources','integration','cloud','server','api','infra','developer','modernization',
@@ -77,7 +77,15 @@ const NON_NAME_TOKENS: ReadonlySet<string> = new Set([
   'design','style','theme','version','edition','tier','level','stage','status','type','kind',
   'form','field','label','placeholder','input','output','result','outcome','feed','story',
   'post','article','news','media','contents','content','sign','in','out',
-  'pricing','plan'
+  'pricing','plan','senior','junior','mid','lead',
+  'facebook','google','amazon','microsoft','apple','uber','airbnb','twitter','linkedin',
+  'salesforce','netflix','meta','oracle','ibm','intel','nvidia','tesla','spacex',
+  'alibaba','tencent','baidu','shopify','stripe','paypal','snapchat','reddit','medium',
+  'github','gitlab','heroku','digitalocean','cloudflare','fastly','akamai',
+  'recruit','indeed','glassdoor','zoom','slack','discord','twitch','pinterest',
+  'wordpress','wix','squarespace','webflow','notion','figma','canva',
+  'cisco','juniper','arista','crowdstrike','okta','ping','duo',
+  'mozilla','chrome','safari','firefox','edge','chromium','opera','brave',
 ]);;
 const NON_NAME_PHRASES: ReadonlyArray<string> = [
   'use case','get started','sign in','sign up','log in','log out','lorem','case study',

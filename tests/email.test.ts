@@ -60,12 +60,13 @@ const mkOwner = (over: Partial<DeepOwner> & { name: string; confidence: 'LOW' | 
   return { ...base, ...over } as DeepOwner;
 };
 
-const mkContact = (type: DeepContact['type'] = 'PROFESSIONAL_EMAIL'): DeepContact => ({
+const mkContact = (type: DeepContact['type'] = 'OWNER_VERIFIED_EMAIL'): DeepContact => ({
   type, value: 'jane@acme.com', source_url: 'https://acme.com/team',
   confidence: 'HIGH', note: 'public mailto',
 });
 
-const EMAIL = [mkContact('PROFESSIONAL_EMAIL')];
+const OWNER_EMAIL = [mkContact('OWNER_VERIFIED_EMAIL')];
+const COMPANY_EMAIL = [mkContact('COMPANY_BUSINESS_EMAIL')];
 
 const mkProspect = (over: Partial<DeepProspect> & {
   deep_finding: DeepFinding | null; selected_owner: DeepOwner | null; contactability: DeepContact[]; evidence: Evidence[];
@@ -90,6 +91,7 @@ const mkProspect = (over: Partial<DeepProspect> & {
     selected_owner: over.selected_owner,
     owner_evidence: over.owner_evidence ?? [],
     contactability: over.contactability,
+    contact_status: over.contact_status ?? 'OWNER_VERIFIED_EMAIL',
     findings: over.findings ?? null,
     deep_finding: over.deep_finding,
     evidence: over.evidence,
@@ -144,7 +146,7 @@ console.log('\n--- BLOCK: no defensible finding (null finding) ---');
 {
   const evidence = [ev({ id: 'E1', public_url: 'https://acme.com' })];
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: null, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: null, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'no finding -> not generated');
@@ -160,7 +162,7 @@ console.log('\n--- BLOCK: finding is non-defensible type (GENERIC_ENGINEERING_AR
     explanation: 'a blog post about cloud architecture',
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'generic article -> not generated');
@@ -175,7 +177,7 @@ console.log('\n--- BLOCK: finding is LOW confidence ---');
     source_urls: ['https://acme.com/x'], explanation: 'something seen',
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'LOW confidence -> not generated');
@@ -190,7 +192,7 @@ console.log('\n--- BLOCK: no HIGH-confidence owner ---');
     prospect: mkProspect({
       deep_finding: finding,
       selected_owner: mkOwner({ name: 'Jane Doe', finding_link: 'API surface', confidence: 'MEDIUM' }),
-      contactability: EMAIL, evidence,
+      contactability: OWNER_EMAIL, evidence,
     }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
@@ -204,7 +206,7 @@ console.log('\n--- BLOCK: verified owner not relevant (no finding_link) ---');
   const finding = goodFinding(evidence);
   const ownerNoLink: DeepOwner = { ...goodOwner(), finding_link: undefined };
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: ownerNoLink, contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: ownerNoLink, contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'owner without finding_link -> not generated');
@@ -220,7 +222,7 @@ console.log('\n--- BLOCK: no usable professional contact channel ---');
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'no channel -> not generated');
-  assert(/no usable public professional contact channel/.test(draft.blocked_reason || ''), 'blocked reason names contact channel');
+  assert(/no owner-verified email contact channel/.test(draft.blocked_reason || ''), 'blocked reason names contact channel');
 }
 
 console.log('\n--- BLOCK: claim QA failed (unsupported language) ---');
@@ -232,7 +234,7 @@ console.log('\n--- BLOCK: claim QA failed (unsupported language) ---');
     explanation: 'this endpoint is vulnerable to injection — user input reaches the query layer',
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'unsupported language -> claim QA fails -> not generated');
@@ -247,7 +249,7 @@ console.log('\n--- BLOCK: claim QA failed (no evidence-backed factual claims) --
     source_urls: ['https://api.acme.com/v1/users'], explanation: 'a public endpoint exposes an internal field',
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(!draft.generated, 'no evidence-backed claims -> claim QA fails -> not generated');
@@ -265,7 +267,7 @@ console.log('\n--- POSITIVE: all gates pass -> verbatim 9-section email ---');
   const finding = goodFinding(evidence);
   const owner = goodOwner();
   const caseRef = mkCase({ claim_validation: 'N/A', evidence });
-  const prospect = mkProspect({ deep_finding: finding, selected_owner: owner, contactability: EMAIL, evidence });
+  const prospect = mkProspect({ deep_finding: finding, selected_owner: owner, contactability: OWNER_EMAIL, evidence });
   const draft = DeepEmailGenerator.generate({ prospect, caseRef });
   const lines = draft.body.split('\n');
   const allIds = idsOf(evidence);
@@ -323,7 +325,7 @@ console.log('\n--- POSITIVE: OBSERVED finding -> "Observed … on …" subject -
     explanation: 'a read-only GET to /health returned HTTP 500 across repeatable requests',
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
   assert(draft.generated === true, 'OBSERVED finding -> generated');
@@ -331,8 +333,11 @@ console.log('\n--- POSITIVE: OBSERVED finding -> "Observed … on …" subject -
   assert(draft.body.includes('I was looking at Acme Corp'), 'body personalised for OBSERVED case');
 }
 
-// ── Positive: DOCUMENTED_* finding (DOCUMENTED_FACT) -> safe "verify" statement ──
-console.log('\n--- POSITIVE: DOCUMENTED finding -> safe verify statement ("where applicable") ---');
+// ── BLOCKED: DOCUMENTED_* finding (DOCUMENTED_FACT) -> non-actionable, no email ──
+// Per the outreach gate: only OBSERVED_* and POSSIBLE_* findings (real public
+// behavioral observations) are defensible. DOCUMENTED_INCIDENT is a published
+// status-page record of a past event — NOT an active technical problem.
+console.log('\n--- BLOCK: DOCUMENTED_* finding (documented fact) -> no outreach ---');
 {
   const evidence: Evidence[] = [
     ev({ id: 'D1', public_url: 'https://acme.com/status', evidence_origin: 'DOCUMENTED_SOURCE', observed_behavior: 'status page documents a resolved outage', reproductions: 1 }),
@@ -344,12 +349,11 @@ console.log('\n--- POSITIVE: DOCUMENTED finding -> safe verify statement ("where
     strength: strength('LOW'),
   });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: goodOwner(), contactability: OWNER_EMAIL, evidence }),
     caseRef: mkCase({ claim_validation: 'N/A', evidence }),
   });
-  assert(draft.generated === true, 'DOCUMENTED finding -> generated');
-  assert(/^Noting /.test(draft.primary_subject), 'subject is "Noting … on …"');
-  assert(/I was able to verify this specific observation .+ where applicable\./.test(draft.body), 'non-reproducible -> safe verify statement');
+  assert(!draft.generated, 'DOCUMENTED_* finding -> NOT generated (non-actionable)');
+  assert(/no defensible finding/.test(draft.blocked_reason || ''), 'blocked reason names finding');
 }
 
 // ── Positive: engine-path claims (claim_validation PASSED) -> verbatim body ────
@@ -371,7 +375,7 @@ console.log('\n--- POSITIVE: engine QA-passed path -> verbatim spec body from en
   ];
   const caseRef = mkCase({ claim_validation: 'PASSED', evidence, email_model: { claims: engineClaims, subject: 'engine-subj' } });
   const draft = DeepEmailGenerator.generate({
-    prospect: mkProspect({ deep_finding: finding, selected_owner: owner, contactability: EMAIL, evidence }),
+    prospect: mkProspect({ deep_finding: finding, selected_owner: owner, contactability: OWNER_EMAIL, evidence }),
     caseRef,
   });
   assert(draft.generated === true, 'engine PASSED path -> generated');

@@ -84,15 +84,39 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       const isJson = response.headers.get('content-type')?.includes('application/json');
       evidence.source_type = isJson || currentUrl.includes('/api/') ? 'API_ENDPOINT' : 'PUBLIC_DOCUMENTATION';
 
-      if (status >= 500 || latency > 1500 || isJson) {
+      const latencyTriggered = latency > 1500;
+
+      if (status >= 500 || latencyTriggered || isJson) {
         const samples = await this.performRepeatedObservations(currentUrl, 2, options);
         evidence.latency_samples = [latency, ...samples.map(s => s.latency)];
         evidence.baseline_latency_ms = Math.min(...evidence.latency_samples);
         evidence.reproductions = 1 + samples.length;
-        evidence.repeatable = samples.every(s => s.status === status);
-        
-        if (status >= 500 && evidence.repeatable) {
+
+        if (latencyTriggered) {
+          // For latency findings: "repeatable" means the slow pattern was
+          // reproduced — i.e. the majority of repeated samples also show
+          // elevated latency (≥1000ms). A single slow spike followed by fast
+          // responses is TRANSIENT_NETWORK_VARIATION, not a real server-side
+          // pattern. This distinguishes REAL_SERVER_SIDE_PATTERN from one-off
+          // network jitter.
+          const slowSamples = evidence.latency_samples.filter(s => s >= 1000).length;
+          evidence.repeatable = slowSamples >= Math.ceil(evidence.latency_samples.length / 2)
+            && samples.every(s => s.status === status);
+        } else {
+          // Non-latency cases: repeatable means status consistency across samples.
+          evidence.repeatable = samples.every(s => s.status === status);
+        }
+
+        if (status >= 500 && evidence.repeatable && evidence.latency_samples.length >= 3) {
           evidence.observed_behavior = `Repeated HTTP ${status} response`;
+        }
+
+        // For latency stability, attach the latency_samples summary so
+        // DeepProspectBuilder.detectDeepFinding can apply its stability rule.
+        if (latencyTriggered && evidence.repeatable) {
+          evidence.observed_behavior = evidence.observed_behavior
+            ? `${evidence.observed_behavior} — slow latency reproduced across ${evidence.reproductions} sample(s).`
+            : `Slow latency (${latency}ms) reproduced across ${evidence.reproductions} sample(s).`;
         }
       }
 
@@ -126,7 +150,8 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       await new Promise(r => setTimeout(r, 300));
       const start = performance.now();
       try {
-        const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(options?.timeoutMs || 8000) });
+        const fetcher: HttpFetcher = this.options?.fetcher ?? (async (u, init) => fetch(u, { method: init.method, headers: init.headers, signal: init.signal }));
+        const res = await fetcher(url, { method: 'GET', headers: options?.headers || {}, signal: AbortSignal.timeout(options?.timeoutMs || 8000) });
         await res.arrayBuffer().catch(()=>null);
         results.push({ status: res.status, latency: Math.round(performance.now() - start) });
       } catch (err) {

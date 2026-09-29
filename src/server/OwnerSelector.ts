@@ -40,6 +40,14 @@ export class OwnerSelector {
       // role relevance to technical area
       const roleHit = areaTokens.some(t => c.relationship_to_area.toLowerCase().includes(t) || c.role.toLowerCase().includes(t));
       if (roleHit) score += 25;
+      // Tie-breaker: prefer candidates whose role title contains an explicitly
+      // technical domain keyword (CTO, VP of Engineering, Head of Security, etc.)
+      // over non-technical titles (CEO, Founder, CPO for non-tech domains). This
+      // prevents a CEO from winning over a VP of Engineering when both have HIGH
+      // confidence and explicit evidence for a technical finding.
+      const roleLower = (c.role || '').toLowerCase();
+      const hasTechTitle = ['cto','cpo','chief technology','chief product','engineer','engineering','infrastructure','infra','platform','security','compliance','infosec','sre','reliability','backend','api','devops','architect','head of','vp of','director of','lead','principal','staff','technical'].some(kw => roleLower.includes(kw));
+      if (hasTechTitle) score += 10;
       return { candidate: c, score };
     });
 

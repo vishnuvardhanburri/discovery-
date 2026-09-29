@@ -46,7 +46,13 @@ const UNSUPPORTED_TERMS = [
 
 // Finding types that are never defensible enough to draft on their own.
 const NON_DEFENSIBLE = new Set([
-  'GENERIC_ENGINEERING_ARTICLE', 'UNEXPECTED_PUBLIC_BEHAVIOR', 'CONFLICTING_EVIDENCE'
+  'GENERIC_ENGINEERING_ARTICLE', 'UNEXPECTED_PUBLIC_BEHAVIOR', 'CONFLICTING_EVIDENCE',
+  // DOCUMENTED_* findings are published facts/records (compliance certs, past
+  // incidents, documented rate limits) — not active technical problems. A
+  // compliance page listing ISO 27001 is a positive organizational statement,
+  // not a defect or risk worthy of outreach.
+  'DOCUMENTED_SECURITY_POSTURE', 'DOCUMENTED_SCALING_CONSTRAINT',
+  'DOCUMENTED_INCIDENT', 'DOCUMENTED_ENGINEERING_FAILURE',
 ]);
 
 export class DeepEmailGenerator {
@@ -56,9 +62,16 @@ export class DeepEmailGenerator {
     const finding: FindingClassification | DeepFinding | null = df ?? (caseRef.finding_classification || null);
     const owner = prospect.selected_owner;
     const ownerHigh = !!owner && owner.confidence === 'HIGH';
-    const hasChannel = prospect.contactability.some(
-      ct => ct.type === 'PROFESSIONAL_EMAIL' || ct.type === 'PROFESSIONAL_PROFILE'
+    const hasOwnerVerifiedEmail = prospect.contactability.some(
+      ct => ct.type === 'OWNER_VERIFIED_EMAIL'
     );
+    const hasCompanyBusinessEmail = prospect.contactability.some(
+      ct => ct.type === 'COMPANY_BUSINESS_EMAIL'
+    );
+    // For email generation, OWNER_VERIFIED_EMAIL is required. A company
+    // business email (sales@, oauth@, etc.) does NOT constitute a verified
+    // personal contact — we must not draft an email to a role account.
+    const hasVerifiedChannel = hasOwnerVerifiedEmail;
 
     const findingDefensible = !!finding && (df ? df.confidence !== 'LOW' : true)
       && !NON_DEFENSIBLE.has(finding.finding_type);
@@ -79,13 +92,19 @@ export class DeepEmailGenerator {
       ? true
       : (claims.length > 0 && this.deepClaimsPassQa(claims));
 
-    // ---- GATE -------------------------------------------------------------
+    // ── Gate ─────────────────────────────────────────────────────────────────
+    // COMMERCIAL-INTELLIGENCE MODEL:
+    // The diagnostic opportunity gate (finding-first) lives in DeepProspectBuilder.
+    // The EMAIL gate here is strictly about whether we can draft a person-specific
+    // email ("Hi John,"). A defensible finding WITHOUT a verified owner email
+    // still produces OUTREACH_READY — the human handles contact manually.
+    // The email is BLOCKED, not the opportunity.
     const blocked: string[] = [];
     if (!findingDefensible) blocked.push(
       `no defensible finding (finding: ${finding ? `${finding.finding_type}/${df ? df.confidence : '?'}` : 'NONE'}).`
     );
-    if (!ownerHigh) blocked.push('no evidence-backed HIGH-confidence technical owner.');
-    if (!hasChannel) blocked.push('no usable public professional contact channel.');
+    if (!ownerHigh) blocked.push('no evidence-backed HIGH-confidence technical owner — find contact manually; diagnostic opportunity is still valid.');
+    if (!hasVerifiedChannel) blocked.push('no owner-verified email contact channel (only company/role mailboxes or profiles found) — human operator to handle contact.');
     if (!ownerRelevant) blocked.push('verified owner is not relevant to the finding area.');
     if (!claimQAPassed) blocked.push('claim QA failed (unsupported language or no evidence-backed claims).');
 
@@ -112,13 +131,20 @@ export class DeepEmailGenerator {
     owner: DeepOwner | null
   ): EvidenceClaim[] {
     const ev = finding.evidence_ids;
-    const reproducible = finding.provenance === 'REAL_PUBLIC_OBSERVATION'
-      && finding.strength.reproducibility !== 'LOW';
+    // Static documentation findings (DOCUMENTED_*) are published facts, not
+    // dynamic behaviors that can be "reproduced." Only OBSERVED_* / POSSIBLE_*
+    // findings with proven reproducibility qualify for reproduction language.
+    const isStaticDoc = finding.finding_type.startsWith('DOCUMENTED_');
+    const reproducible = !isStaticDoc
+      && finding.provenance === 'REAL_PUBLIC_OBSERVATION'
+      && finding.strength?.reproducibility !== 'LOW';
     const first = owner ? owner.name.split(' ')[0] : 'there';
     const techArea = owner?.finding_link || 'technical ownership';
     const observedText = (finding.explanation || finding.severity_basis || 'a publicly observable behavior').trim();
     const reproStatement = reproducible
       ? 'reproduce the observed behavior using a normal read-only request (no auth bypass)'
+      : isStaticDoc
+      ? 'find this documented on the public page via a normal read-only request'
       : 'verify this specific observation against the public surface with a normal read-only request';
     const sourceUrl = finding.source_urls?.[0] || '';
 
@@ -180,6 +206,8 @@ export class DeepEmailGenerator {
     const firstName = owner ? owner.name.split(' ')[0] : 'there';
     const company = prospect.company;
     const techArea = owner?.finding_link || 'the relevant technical area';
+    // Avoid "public public API surface" when techArea already starts with "public".
+    const techAreaDisplay = /^public\s+/i.test(techArea) ? techArea : `public ${techArea}`;
 
     // --- Section 3: the specific observation ---
     const obsClaim = claims.find(c => c.claim_type === 'OBSERVATION' || c.claim_type === 'DOCUMENTED_FACT');
@@ -188,13 +216,32 @@ export class DeepEmailGenerator {
     if (!observedText) observedText = finding?.severity_basis || '';
     if (!observedText) observedText = 'a publicly observable behavior on the documented surface';
     observedText = DeepEmailGenerator.cleanSentence(observedText);
+    // Strip irrelevant trailing noise (e.g. "Frequently asked questions." from
+    // page footers that co-occur with the certification list).
+    observedText = observedText
+      .replace(/\s+frequently asked questions\.?$/i, '')
+      .replace(/\s+(FAQ|faq)\.?$/i, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    // Lowercase the first letter so the observation integrates as a dependent
+    // clause after "and noticed" (avoids "noticed The company's...").
+    if (observedText.length > 0) {
+      observedText = observedText.charAt(0).toLowerCase() + observedText.slice(1);
+    }
 
     // --- Section 4: safe reproduction statement ("where applicable") ---
-    const isReal = (finding as DeepFinding | null)?.provenance === 'REAL_PUBLIC_OBSERVATION';
-    const strength = (finding as DeepFinding | null)?.strength;
-    const reproducible = !!isReal && !!strength && strength.reproducibility !== 'LOW';
+    // Static documentation findings (DOCUMENTED_*) are published facts, not
+    // dynamic behaviors that can be "reproduced." Only OBSERVED_* / POSSIBLE_*
+    // findings with proven reproducibility qualify for reproduction language.
+    const deepFinding = finding as DeepFinding | null;
+    const isStaticDoc = !!deepFinding && deepFinding.finding_type.startsWith('DOCUMENTED_');
+    const isReal = !!deepFinding && deepFinding.provenance === 'REAL_PUBLIC_OBSERVATION';
+    const strength = deepFinding?.strength;
+    const reproducible = !!isReal && !!strength && strength.reproducibility !== 'LOW' && !isStaticDoc;
     const reproStatement = reproducible
       ? 'reproduce the observed behavior using a normal read-only request (no auth bypass)'
+      : isStaticDoc
+      ? 'find this on the public page via a normal read-only request (no auth bypass)'
       : 'verify this specific observation against the public surface with a normal read-only request';
 
     // --- Section 5: source URL ---
@@ -239,7 +286,7 @@ export class DeepEmailGenerator {
     const body = [
       `Hi ${firstName},`,
       "I'm Vishnu, the solo founder building XAVIRA.",
-      `I was looking at ${company}'s public ${techArea} and noticed ${observedText}.`,
+      `I was looking at ${company}'s ${techAreaDisplay} and noticed ${observedText}.`,
       `I was able to ${reproStatement}, where applicable.`,
       `Source: ${displaySrc}`,
       `I reached out because your public role is associated with ${techArea}.`,

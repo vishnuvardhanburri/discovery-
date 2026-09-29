@@ -56,19 +56,31 @@ async function main() {
     console.log('\n=== RESULT ===');
     console.log('decision:', prospect.decision);
     console.log('confidence:', prospect.confidence);
+    console.log('finding:', prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE');
+    console.log('diagnostic_opportunity:', prospect.diagnostic_opportunity ? prospect.diagnostic_opportunity.problem_type : 'NONE');
+    if (prospect.diagnostic_opportunity) {
+      console.log('  commercial_relevance:', prospect.diagnostic_opportunity.commercial_relevance);
+      console.log('  technical_area:', prospect.diagnostic_opportunity.technical_area);
+      console.log('  recommended_responsibility:', prospect.diagnostic_opportunity.recommended_responsibility);
+      console.log('  questions:', prospect.diagnostic_opportunity.diagnostic_questions.length);
+    }
     console.log('selected_owner:', prospect.selected_owner ? `${prospect.selected_owner.name} (${prospect.selected_owner.role})` : 'NONE');
-    console.log('deep_finding:', prospect.deep_finding?.finding_type || 'NONE');
+    console.log('contact_status:', prospect.contact_status);
     console.log('email generated:', prospect.email_draft?.generated);
     if (!prospect.email_draft?.generated) {
       console.log('email blocked_reason:', prospect.email_draft?.blocked_reason || 'none');
     }
 
-    // Print the formatted outreach card
+    // Print the formatted outreach card (only for defensible findings)
     const card = OutreachCardPrinter.buildCard(prospect);
     if (card) {
       console.log('\n' + OutreachCardPrinter.printCard(card));
+    } else if (prospect.decision === 'RESEARCH_MORE') {
+      console.log('\n🔍 No outreach card — finding not defensible (RESEARCH_MORE).');
+      console.log('   finding:', prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE');
+      console.log('   Reasons:', (prospect.qualification_reasons || []).join('; ') || 'none');
     } else {
-      console.log('\n❌ No outreach card — prospect not ready (missing owner, finding, or email).');
+      console.log('\n❌ No outreach card — prospect not ready.');
       console.log('   decision:', prospect.decision);
       console.log('   Reasons:', prospect.qualification_reasons || []);
     }

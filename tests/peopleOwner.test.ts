@@ -252,15 +252,15 @@ run('ContactabilityFinder — no email guessing (LinkedIn-only page produces no 
   const emails = contacts.filter(c => c.type === 'PROFESSIONAL_EMAIL');
   assert(emails.length === 0, 'no PROFESSIONAL_EMAIL fabricated from a LinkedIn-only page');
 
-  const profiles = contacts.filter(c => c.type === 'PROFESSIONAL_PROFILE');
-  assert(profiles.length === 1, 'exactly one PROFESSIONAL_PROFILE captured from public link');
+  const profiles = contacts.filter(c => c.type === 'PUBLIC_PROFESSIONAL_CONTACT');
+  assert(profiles.length === 1, 'exactly one PUBLIC_PROFESSIONAL_CONTACT captured from public link');
   assert(profiles[0].value.includes('linkedin.com/in/janedoe'), 'profile link is the real public URL');
 
   // No email-like values anywhere (no invented firstname@company.com)
   assert(!contacts.some(c => /@/.test(c.value)), 'no email-like value constructed from thin air');
 });
 
-run('ContactabilityFinder — role accounts filtered from both Growjo and public', () => {
+run('ContactabilityFinder — role accounts classified as COMPANY_BUSINESS_EMAIL (not dropped)', () => {
   const html = `<html><body>
 <a href="mailto:jane@acme.com">jane</a>
 <a href="mailto:info@acme.com">info</a>
@@ -269,13 +269,21 @@ run('ContactabilityFinder — role accounts filtered from both Growjo and public
 </body></html>`;
   const pages: DiscoveredPage[] = [{ url: 'https://acme.com/team', path: '/team', category: 'team_people' }];
 
-  // Growjo email is also a role account — should be filtered too.
+  // Growjo email is also a role account — should be classified as COMPANY_BUSINESS_EMAIL too.
   const growjo = makeGrowjoCompany({ primary_email: 'team@acme.com' });
   const contacts = ContactabilityFinder.find(pages, new Map([['https://acme.com/team', html]]), undefined, growjo);
 
   const emails = contacts.filter(c => c.type === 'PROFESSIONAL_EMAIL');
-  assert(emails.length === 1, 'only the non-role public email captured (expected 1, got ' + emails.length + ')');
-  assert(emails[0].value === 'jane@acme.com', 'role accounts (info@, sales@, noreply@, team@) filtered from public + Growjo');
+  assert(emails.length === 1, 'only the non-role public email captured as PROFESSIONAL_EMAIL (expected 1, got ' + emails.length + ')');
+  assert(emails[0].value === 'jane@acme.com', 'role accounts (info@, sales@, noreply@, team@) classified as COMPANY_BUSINESS_EMAIL, not dropped');
+
+  const roleEmails = contacts.filter(c => c.type === 'COMPANY_BUSINESS_EMAIL');
+  const roleValues = roleEmails.map(c => c.value).sort();
+  assert(roleValues.includes('info@acme.com'), 'info@ classified as COMPANY_BUSINESS_EMAIL');
+  assert(roleValues.includes('sales@acme.com'), 'sales@ classified as COMPANY_BUSINESS_EMAIL');
+  assert(roleValues.includes('noreply@acme.com'), 'noreply@ classified as COMPANY_BUSINESS_EMAIL');
+  assert(roleValues.includes('team@acme.com'), 'team@ (Growjo) classified as COMPANY_BUSINESS_EMAIL');
+  assert(!ContactabilityFinder.hasOwnerVerifiedEmail(contacts), 'no OWNER_VERIFIED_EMAIL from role accounts');
 });
 
 run('ContactabilityFinder — public HTML: mailto + tel + profile + contact page captured', () => {
@@ -298,7 +306,7 @@ run('ContactabilityFinder — public HTML: mailto + tel + profile + contact page
   assert(phone?.value === '+15551234567', 'phone value is the tel: contents');
   assert(phone?.source_url === 'https://acme.com/team', 'phone provenance recorded');
 
-  const profile = contacts.find(c => c.type === 'PROFESSIONAL_PROFILE');
+  const profile = contacts.find(c => c.type === 'PUBLIC_PROFESSIONAL_CONTACT');
   assert(!!profile, 'public profile link captured');
   assert(!!(profile?.value.includes('linkedin.com/in/janedoe')), 'LinkedIn profile link captured');
 

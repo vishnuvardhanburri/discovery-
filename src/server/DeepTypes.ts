@@ -73,13 +73,17 @@ export interface DeepSignal {
 // ── Contactability ───────────────────────────────────────────────────────────
 
 export type ContactKind =
-  | 'PROFESSIONAL_PROFILE'   // public LinkedIn / Twitter / GitHub profile link (legacy)
-  | 'PROFILE'                // generic public professional profile link (non-LinkedIn)
-  | 'PROFESSIONAL_EMAIL'     // public mailto: or Growjo licensed professional email
-  | 'LINKEDIN'               // public LinkedIn profile link (Growjo or explicit)
-  | 'PHONE'                  // publicly listed professional phone number
-  | 'PRESS_CONTACT'          // press / media contact
-  | 'CONTACT_PAGE';          // a publicly linked contact page
+  | 'PROFESSIONAL_PROFILE'        // public LinkedIn / Twitter / GitHub profile link (legacy, broad)
+  | 'PROFILE'                     // generic public professional profile link (non-LinkedIn)
+  | 'PROFESSIONAL_EMAIL'          // broad professional email (kept for backward compat / Growjo licensed)
+  | 'OWNER_VERIFIED_EMAIL'        // email explicitly linked to a specific person (mailto on person's page, licensed lead email)
+  | 'COMPANY_BUSINESS_EMAIL'      // role account email (sales@, oauth@, support@, info@) found on company pages
+  | 'PUBLIC_PROFESSIONAL_CONTACT' // public professional profile link associated with a specific person
+  | 'LINKEDIN'                    // public LinkedIn profile link (Growjo or explicit)
+  | 'PHONE'                       // publicly listed professional phone number
+  | 'PRESS_CONTACT'               // press / media contact
+  | 'CONTACT_PAGE'                // a publicly linked contact page
+  | 'UNVERIFIED_POSSIBLE_EMAIL';  // never used — no address guessing (type reserved for clarity)
 
 export type ContactConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -89,6 +93,8 @@ export interface DeepContact {
   value: string;
   source_url: string;
   confidence: ContactConfidence;
+  /** If this contact is linked to a specific person (e.g. their profile page), the owner's name. */
+  owner_name?: string;
   /** Human readable note describing how the value was observed. */
   note?: string;
 }
@@ -240,6 +246,110 @@ export interface DeepEmailDraft {
 export type DeepDecision = 'OUTREACH_READY' | 'RESEARCH_MORE' | 'NO_GO';
 export type DeepConfidence = 'LOW' | 'MEDIUM' | 'HIGH';
 
+/** Fields of a commercial outreach card (problem-first, contact secondary). */
+export interface OutreachCardFields {
+  company: string;
+  company_url: string;
+  person: string;
+  role: string;
+  contact: string;
+  contact_status: string;
+  why_this_person: string;
+  problem: string;
+  finding_type: string;
+  primary_source: string;
+  supporting_sources: string[];
+  supporting_evidence: string[];
+  technical_area: string;
+  recommended_responsibility: string;
+  role_search_hints: string[];
+  subject: string;
+  email: string;
+  backup_subject: string;
+  backup_email: string;
+  reply_evidence_pack: { claim_type: string; text: string; evidence_ids: string[] }[];
+  diagnostic_angle: string;
+  confidence: string;
+  diagnostic_potential: string;
+  next_action: string;
+}
+/**
+ * Commercial relevance classification — an internal workflow signal, NOT a
+ * claim about the company's internal state. Answers: "Is there enough public
+ * evidence that a paid diagnostic could reasonably investigate this area?"
+ */
+export type CommercialRelevance =
+  | 'HIGH_DIAGNOSTIC_POTENTIAL'
+  | 'MEDIUM_DIAGNOSTIC_POTENTIAL'
+  | 'LOW_DIAGNOSTIC_POTENTIAL'
+  | 'RESEARCH_MORE';
+
+/** Technical problem category used to route a DiagnosticOpportunity. */
+export type TechnicalProblemType =
+  | 'API_BEHAVIOR'
+  | 'PERFORMANCE_LATENCY'
+  | 'AVAILABILITY'
+  | 'SCALING_CAPACITY'
+  | 'PUBLIC_EXPOSURE'
+  | 'CONFIGURATION'
+  | 'DATABASE_STORAGE'
+  | 'ARCHITECTURE'
+  | 'SECURITY_POSTURE'
+  | 'DEPLOYMENT_PLATFORM'
+  | 'RELIABILITY'
+  | 'INFO_DISCLOSURE'
+  | 'ACCESS_BOUNDARY'
+  | 'GENERAL_ENGINEERING'
+  | 'NEEDS_RESEARCH';
+
+/**
+ * A diagnostic opportunity — the core commercial output of XAVIRA.
+ * Represents a company/problem pair with enough public evidence that a £15K
+ * diagnostic engagement could reasonably investigate the area.
+ *
+ * It does NOT claim a problem exists internally — it proposes a diagnostic
+ * hypothesis backed by observable public evidence.
+ */
+export interface DiagnosticOpportunity {
+  company: string;
+  company_url: string;
+
+  problem: string;
+  problem_type: TechnicalProblemType;
+
+  /** Why this is worth a diagnostic — derived strictly from evidence. */
+  why_it_matters: string;
+
+  /** IDs of evidence records backing the finding (traceable). */
+  evidence_ids: string[];
+  /** Source URLs of the primary evidence. */
+  primary_sources: string[];
+
+  /** IDs of supporting signals (correlations). */
+  signal_ids: string[];
+  /** IDs of correlation groups backing the finding. */
+  correlation_ids: string[];
+  supporting_sources: string[];
+
+  technical_area: string;
+  recommended_responsibility: string;
+  role_keywords: string[];
+  search_hints: string[];
+
+  /** 5–8 diagnostic questions, generated from evidence only. */
+  diagnostic_questions: string[];
+  /** Proposed scope items for a £15K diagnostic. */
+  diagnostic_scope: string[];
+
+  /** The finding that backs this opportunity. */
+  finding_type: FindingType;
+  finding_confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+
+  commercial_relevance: CommercialRelevance;
+  decision: DeepDecision;
+  confidence: DeepConfidence;
+}
+
 export interface DeepProspect {
   company: string;
   domain: string;
@@ -256,6 +366,9 @@ export interface DeepProspect {
   selected_owner: DeepOwner | null;
   owner_evidence: string[];
   contactability: DeepContact[];
+  /** Status of contact verification — distinguishes owner-verified email from
+   * company/role mailboxes and unverified profiles. */
+  contact_status: 'OWNER_VERIFIED_EMAIL' | 'COMPANY_BUSINESS_EMAIL' | 'UNVERIFIED_POSSIBLE_EMAIL' | 'PUBLIC_PROFESSIONAL_CONTACT' | 'CONTACT_PAGE' | 'NO_VERIFIED_CONTACT';
   findings: FindingClassification | null;
   /** Deep-layer finding (supplements `findings` with evidence IDs + provenance). */
   deep_finding: DeepFinding | null;
@@ -292,6 +405,10 @@ export interface DeepProspect {
   live_web_evidence?: Evidence[];
   /** Search queries executed during live-web research (audit trail). */
   search_queries?: { query: string; results: number; cached: boolean }[];
+  /** Outreach card for manual contact (problem-first, contact secondary). */
+  outreach_card?: Partial<OutreachCardFields>;
+  /** Diagnostic opportunity derived from the public finding (commercial intelligence). */
+  diagnostic_opportunity?: DiagnosticOpportunity | null;
   /** Whether live-web research was performed (search + augmentation). */
   live_web_researched?: boolean;
   /** Change-detection diff (new/changed/unchanged) vs. previously stored state. */

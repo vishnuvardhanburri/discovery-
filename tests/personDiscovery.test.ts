@@ -441,8 +441,8 @@ async function main() {
     test('14.6 completely unknown source not trusted', blocked.is_trusted === false);
   });
 
-  // ── 15. Strong ICP + missing owner → RESEARCH_MORE ─────────────────────────
-  await run('15. Strong ICP + good research + NO owner → RESEARCH_MORE (not NO_GO)', async () => {
+  // ── 15. Strong ICP + missing owner → OUTREACH_READY (finding-first, contact optional) ──
+  await run('15. Strong ICP + good research + NO owner → OUTREACH_READY (diagnostic opportunity, contact optional)', async () => {
     // Setup: company has technical evidence but no person on any page
     const noPeopleHtml = `<html><body><h1>Acme Corp</h1><p>Developer infra platform.</p>
     <nav><a href="/engineering">Engineering</a><a href="/about">About</a></nav></body></html>`;
@@ -463,12 +463,18 @@ async function main() {
       resolution: { canonical_name: 'Acme Corp', official_domain: 'acme.com', resolution_method: 'AMBIGUOUS', resolution_source: 'manual', resolution_confidence: 'HIGH' },
     });
     const { prospect } = await builder.build('https://acme.com');
-    test('15.1 decision is RESEARCH_MORE', prospect.decision === 'RESEARCH_MORE', `got ${prospect.decision}`);
-    test('15.1 NOT NO_GO despite missing owner', prospect.decision !== 'NO_GO');
+    // COMMERCIAL MODEL: a defensible finding → OUTREACH_READY (diagnostic opportunity ready).
+    // No owner is needed — the human operator handles contact manually.
+    test('15.1 decision is OUTREACH_READY (finding-first, no owner required)', prospect.decision === 'OUTREACH_READY', `got ${prospect.decision}`);
+    test('15.1a NOT NO_GO despite missing owner', prospect.decision !== 'NO_GO');
+    test('15.2 diagnostic opportunity generated', !!prospect.diagnostic_opportunity, 'diagnostic_opportunity should be populated');
+    test('15.3 no email generated without verified owner', !prospect.email_draft.generated, 'email blocked — human contacts manually');
+    test('15.4 no fabricated finding when deep_finding null',
+      !(!prospect.deep_finding && prospect.decision === 'OUTREACH_READY'));
   });
 
-  // ── 16. Strong ICP + finding + owner + NO contact → RESEARCH_MORE ──────────
-  await run('16. Strong ICP + finding + HIGH owner + no contact → RESEARCH_MORE', async () => {
+  // ── 16. Strong ICP + finding + owner + NO contact → OUTREACH_READY (contact optional) ──
+  await run('16. Strong ICP + finding + HIGH owner + no contact → OUTREACH_READY (email blocked, contact optional)', async () => {
     const routes: Record<string, Route> = {
       'https://acme.com': { status: 200, body: HOME_HTML, ct: 'text/html' },
       'https://acme.com/team': { status: 200, body: TEAM_HTML, ct: 'text/html' },
@@ -488,7 +494,9 @@ async function main() {
     // Owner should be found (Jane from team page); no public contact email
     test('16.1 owner found', !!prospect.selected_owner, `decision=${prospect.decision}`);
     test('16.2 no professional contact found', prospect.contactability.length === 0, `contacts=${prospect.contactability.length}`);
-    test('16.3 decision is RESEARCH_MORE', prospect.decision === 'RESEARCH_MORE', `got ${prospect.decision}`);
+    // COMMERCIAL MODEL: defensible finding → OUTREACH_READY even without contact.
+    // Email is blocked (no OWNER_VERIFIED_EMAIL), but the diagnostic opportunity is valid.
+    test('16.3 decision is OUTREACH_READY (finding-first, contact optional)', prospect.decision === 'OUTREACH_READY', `got ${prospect.decision}`);
   });
 
   // ── 17. Complete evidence chain → OUTREACH_READY ──────────────────────────

@@ -9,7 +9,7 @@ const assertEq = <T,>(a: T, b: T, m: string) => { const ok = JSON.stringify(a) =
 
 const detect = (b: DeepProspectBuilder) => (b as any).detectDeepFinding.bind(b);
 
-const mkEv = (over: Partial<Evidence> & { id: string; observed_behavior?: string; status?: number; sensitive_fields?: string[]; public_url?: string; reproductions?: number; latency_ms?: number; baseline_latency_ms?: number }): Evidence => ({
+const mkEv = (over: Partial<Evidence> & { id: string; observed_behavior?: string; status?: number; sensitive_fields?: string[]; public_url?: string; reproductions?: number; latency_ms?: number; baseline_latency_ms?: number; latency_samples?: number[]; repeatable?: boolean }): Evidence => ({
   evidence_origin: over.evidence_origin ?? 'REAL_PUBLIC_OBSERVATION',
   source_type: over.source_type ?? 'API_ENDPOINT',
   public_url: over.public_url ?? `https://api.acme.com/${over.id}`,
@@ -20,7 +20,7 @@ const mkEv = (over: Partial<Evidence> & { id: string; observed_behavior?: string
   not_tested: over.not_tested ?? [],
   retrieved_at: over.retrieved_at ?? new Date().toISOString(),
   evidence_text: over.evidence_text ?? over.observed_behavior ?? 'ok',
-  sensitive_fields: over.sensitive_fields, latency_ms: over.latency_ms, baseline_latency_ms: over.baseline_latency_ms,
+  sensitive_fields: over.sensitive_fields, latency_ms: over.latency_ms, baseline_latency_ms: over.baseline_latency_ms, latency_samples: over.latency_samples,
   ...over,
 } as Evidence);
 
@@ -83,9 +83,9 @@ console.log('\n--- R5: documented scaling constraint ---');
 console.log('\n--- R6: observed latency (>=3 slow reproducible samples -> OBSERVED_LATENCY) ---');
 {
   const obs = [
-    mkEv({ id: 'E1', observed_behavior: 'slow', latency_ms: 2500, baseline_latency_ms: 100, reproductions: 3 }),
-    mkEv({ id: 'E2', observed_behavior: 'slow', latency_ms: 2200, baseline_latency_ms: 100, reproductions: 3 }),
-    mkEv({ id: 'E3', observed_behavior: 'slow', latency_ms: 3000, baseline_latency_ms: 100, reproductions: 3 }),
+    mkEv({ id: 'E1', observed_behavior: 'slow', latency_ms: 2500, baseline_latency_ms: 100, reproductions: 3, latency_samples: [2500, 2200, 2800], repeatable: true }),
+    mkEv({ id: 'E2', observed_behavior: 'slow', latency_ms: 2200, baseline_latency_ms: 100, reproductions: 3, latency_samples: [2200, 2100, 2300], repeatable: true }),
+    mkEv({ id: 'E3', observed_behavior: 'slow', latency_ms: 3000, baseline_latency_ms: 100, reproductions: 3, latency_samples: [3000, 2900, 3100], repeatable: true }),
   ];
   const f = find([], obs);
   assertEq(f?.finding_type, 'OBSERVED_LATENCY', 'R6 type');
@@ -95,8 +95,8 @@ console.log('\n--- R6: observed latency (>=3 slow reproducible samples -> OBSERV
 console.log('\n--- R6 regression: <3 slow samples -> no latency finding (threshold is >=3) ---');
 {
   const obs = [
-    mkEv({ id: 'E1', observed_behavior: 'slow', latency_ms: 2500, baseline_latency_ms: 100, reproductions: 3 }),
-    mkEv({ id: 'E2', observed_behavior: 'slow', latency_ms: 3000, baseline_latency_ms: 100, reproductions: 3 }),
+    mkEv({ id: 'E1', observed_behavior: 'slow', latency_ms: 2500, baseline_latency_ms: 100, reproductions: 3, latency_samples: [2500, 2200, 2800], repeatable: true }),
+    mkEv({ id: 'E2', observed_behavior: 'slow', latency_ms: 3000, baseline_latency_ms: 100, reproductions: 3, latency_samples: [3000, 2900, 3100], repeatable: true }),
   ];
   const f = find([], obs);
   assert(f === null, 'two slow samples do NOT produce OBSERVED_LATENCY');

@@ -19,13 +19,14 @@ import fs from 'fs';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
 import { PublicLinkDiscovery, categorizeProfessionalPath } from './PublicLinkDiscovery';
-import { subsystemFromFinding } from './DeepOwnerResolver';
+import { subsystemFromFinding, DeepOwnerResolver } from './DeepOwnerResolver';
 import { PeopleExtractor } from './PeopleExtractor';
 import type {
   DeepBuilderOptions, DeepBuilderResult, DeepProspect, DeepSignal,
   DeepOwner, DeepContact, IcpQualification, DeepDecision, DeepConfidence,
   DeepStage, DeepEmailDraft, DeepFinding, EvidenceProvenance,
-  ProviderCompanyLike, GrowjoCompany, CompanyResolution, GithubRepoMeta, ActivityEvent
+  ProviderCompanyLike, GrowjoCompany, CompanyResolution, GithubRepoMeta, ActivityEvent,
+  DiagnosticOpportunity, OutreachCardFields
 } from './DeepTypes';
 import type {
   IntelligenceCase, Evidence, OwnerCandidate, CompanySurface, FindingClassification, FindingType, SeverityLevel, StrengthLevel, DiscoveredPage
@@ -39,6 +40,7 @@ import { GitHubDiscovery } from './GitHubDiscovery';
 import { ActivityTimeline } from './ActivityTimeline';
 import { IcpQualificationEngine, type IcpContext } from './IcpQualificationEngine';
 import { DeepEmailGenerator } from './DeepEmailGenerator';
+import { buildOpportunity, buildOutreachCardFields } from './DiagnosticOpportunityEngine';
 import { DataSufficiencyChecker } from './DataSufficiencyChecker';
 import { LiveWebResearchProvider } from './LiveWebResearchProvider';
 import { ChangeDetector, snapshotFromProspect } from './ChangeDetector';
@@ -55,6 +57,64 @@ const EXPOSURE_LANGUAGE_RE = /\b(unauthenticated|without\s+auth|publicly\s+acces
  * Shared by the R8 access-issue rule and the adversarial-corroboration check.
  */
 const DENIAL_LANGUAGE_RE = /\b(unauthorized|forbidden|denied|access denied|requires? authentication|authentication required)\b/i;
+
+/**
+ * Finding types that are NOT actionable for outreach.
+ * These represent documented/published facts about the company (compliance
+ * certifications, product rate limits, scaling constraints) — not active technical
+ * problems that an engineer would need to act on. A compliance page listing
+ * ISO 27001 is a positive organizational statement, not a defect or risk.
+ *
+ * Only OBSERVED_* and POSSIBLE_* findings (actual technical behaviors
+ * observed against the public surface) count as ACTIONABLE_FINDING for the
+ * outreach gate.
+ */
+const NON_ACTIONABLE_FINDING_TYPES = new Set([
+  'DOCUMENTED_SECURITY_POSTURE',
+  'DOCUMENTED_SCALING_CONSTRAINT',
+  'DOCUMENTED_INCIDENT',
+  'DOCUMENTED_ENGINEERING_FAILURE',
+]);
+
+/**
+ * Keywords that indicate an explicitly technical role or domain relevance.
+ * These must appear in the owner's role or evidence text for the owner to be
+ * considered relevant to a finding. "Co-Founder", "CEO", "Founder" are NOT in
+ * this list — they are business roles, not technical roles. We do NOT infer
+ * technical ownership from a founder title or the company's product.
+ */
+const TECHNICAL_ROLE_KEYWORDS = [
+  'cto', 'cpo', 'chief technology', 'chief product',
+  'engineer', 'engineering', 'infrastructure', 'infra', 'platform',
+  'security', 'compliance', 'infosec', 'sre', 'reliability',
+  'backend', 'api', 'devops', 'architect', 'head of', 'vp of',
+  'director of', 'lead', 'principal', 'staff', 'technical',
+];
+
+/**
+ * Check whether the owner's evidence EXPLICITLY mentions a technical keyword
+ * related to the finding's domain. A "Co-Founder" with evidence like "listed as
+ * Co-Founder" does NOT satisfy this — we do not infer technical ownership from
+ * a business title or the company's product. Only titles like CTO, Head of
+ * Engineering, Security Engineer, etc. that explicitly contain technical domain
+ * terms pass.
+ */
+function ownerEvidenceMatchesDomain(
+  owner: { owner_evidence?: string[]; role?: string; evidence?: string[] } | null,
+  findingType: string
+): boolean {
+  if (!owner) return false;
+  // Combine all explicit evidence text from the owner record.
+  const combined = [
+    owner.role || '',
+    ...(owner.owner_evidence || []),
+    ...(owner.evidence || []),
+  ].join(' ').toLowerCase();
+  // Must contain at least one explicitly technical keyword. This rejects
+  // "Co-Founder", "CEO", "Founder" (no technical term in role/evidence).
+  // But accepts "CTO", "Head of Engineering", "Security Lead", etc.
+  return TECHNICAL_ROLE_KEYWORDS.some(kw => combined.includes(kw));
+}
 
 function technicalAreaFromSurface(surface: CompanySurface): string {
   const paths = surface.discovered_pages.map(p => (p.path || '').toLowerCase()).filter(Boolean);
@@ -380,16 +440,22 @@ export class DeepProspectBuilder {
       // Determine provenance from the candidate's evidence tags
       const evidenceText = (ownerSel.candidate.evidence || []).join(' ');
       const provenanceTag = evidenceText.includes('GROWJO_IDENTITY') ? 'GROWJO_SOURCE' : 'PUBLIC_SOURCE';
-      // finding_link: derive from finding subsystem (not technicalAreaFromSurface),
-      // consistent with DeepOwnerResolver — defaults to 'platform engineering'
-      // when no classification/evidence is available yet.
-      const findingLink = subsystemFromFinding(null, []);
+      // Clean garbled [BREAK] tokens from HTML-parsed team-page evidence,
+      // but preserve structured evidence (e.g. GROWJO_IDENTITY tags) as-is.
+      const cleanedEvidence = (ownerSel.candidate.evidence || []).map(e =>
+        e.includes('[BREAK]')
+          ? DeepOwnerResolver.buildEvidenceString(ownerSel.candidate as OwnerCandidate)
+          : e
+      );
+      // finding_link is NOT set here — it requires the finding's technical domain,
+      // which is only known after detectDeepFinding() runs. It will be populated
+      // below only when the owner's evidence EXPLICITLY mentions the domain.
       selectedOwner = {
         ...ownerSel.candidate,
         confidence: ownerSel.candidate.confidence,
-        owner_evidence: ownerSel.candidate.evidence || [],
+        owner_evidence: cleanedEvidence,
         responsibility_match: ownerSel.candidate.relationship_to_area,
-        finding_link: findingLink,
+        finding_link: undefined,
         deep_owner_provenance: provenanceTag,
       } as any;
       sel = {
@@ -518,8 +584,52 @@ export class DeepProspectBuilder {
       }
     }
 
+    // Populate finding_link ONLY when the owner's evidence EXPLICITLY mentions
+    // the finding's technical domain. A "Co-Founder" listed on a company page
+    // does NOT imply technical ownership of security/platform/infra unless the
+    // evidence text explicitly connects them. Without this, finding_link stays
+    // undefined and the outreach gate cannot pass (owner not relevant).
+    if (deepFinding && selectedOwner) {
+      const domainMatch = ownerEvidenceMatchesDomain(
+        selectedOwner as any,
+        deepFinding.finding_type
+      );
+      if (domainMatch) {
+        selectedOwner = {
+          ...selectedOwner,
+          finding_link: subsystemFromFinding(
+            caseRef.finding_classification || null,
+            caseRef.evidence
+          ),
+        } as any;
+        this.onProgress?.('owners', `Owner relevance confirmed: ${selectedOwner!.name} evidence mentions the finding's technical domain.`);
+      } else {
+        this.onProgress?.('owners', `Owner relevance NOT confirmed: ${selectedOwner!.name} (${selectedOwner!.role}) evidence does not mention the finding's technical domain.`);
+      }
+    }
+
     // 7) CONTACTABILITY (public professional contact channels only)
-    const contacts = ContactabilityFinder.find(surface.discovered_pages, htmlByUrl, (stage, message) => this.onProgress?.('contactability', message));
+    const rawContacts = ContactabilityFinder.find(surface.discovered_pages, htmlByUrl, (stage, message) => this.onProgress?.('contactability', message));
+    // Classify and link emails to the selected owner: re-classifies
+    // PROFESSIONAL_EMAIL → OWNER_VERIFIED_EMAIL when explicit evidence
+    // (name match + page proximity) connects the email to the person.
+    // Company/role emails (oauth@, sales@, …) remain COMPANY_BUSINESS_EMAIL.
+    const contacts = ContactabilityFinder.classifyAndLink(rawContacts, selectedOwner, htmlByUrl);
+
+    // Compute contact_status for the prospect output and email gate.
+    const hasOwnerVerifiedEmail = contacts.some(c => c.type === 'OWNER_VERIFIED_EMAIL');
+    const hasCompanyBusinessEmail = contacts.some(c => c.type === 'COMPANY_BUSINESS_EMAIL');
+    const contactStatus = hasOwnerVerifiedEmail
+      ? 'OWNER_VERIFIED_EMAIL'
+      : hasCompanyBusinessEmail
+      ? 'COMPANY_BUSINESS_EMAIL'
+      : contacts.some(c => c.type === 'PROFESSIONAL_EMAIL')
+      ? 'UNVERIFIED_POSSIBLE_EMAIL'
+      : contacts.some(c => c.type === 'PUBLIC_PROFESSIONAL_CONTACT' || c.type === 'PROFESSIONAL_PROFILE' || c.type === 'PROFILE' || c.type === 'LINKEDIN')
+      ? 'PUBLIC_PROFESSIONAL_CONTACT'
+      : contacts.length > 0
+      ? 'CONTACT_PAGE'
+      : 'NO_VERIFIED_CONTACT';
 
     // 8) FINAL ICP QUALIFICATION (all data; finding = deep finding when present)
     const authoritativeFinding = deepFinding ?? (caseRef.finding_classification || null);
@@ -540,7 +650,7 @@ export class DeepProspectBuilder {
       qualification_reasons: icp.reasons, public_surface: surface, technical_signals: signals,
       documented_facts: [], public_observations: [], inferences: [], people,
       owner_candidates: people, selected_owner: selectedOwner, owner_evidence: selectedOwner?.owner_evidence || [],
-      contactability: contacts, findings: authoritativeFinding, deep_finding: deepFinding,
+      contactability: contacts, contact_status: contactStatus, findings: authoritativeFinding, deep_finding: deepFinding,
       evidence: caseRef.evidence, primary_angle: primaryAngle, secondary_angle: secondaryAngle,
       recommended_subjects: [], decision: 'NO_GO' as DeepDecision, confidence: 'LOW' as DeepConfidence,
       artifact_path: '', audit_trail: auditTrail
@@ -548,19 +658,70 @@ export class DeepProspectBuilder {
     const email = DeepEmailGenerator.generate({ prospect: draftInput, caseRef }, (stage, message) => this.onProgress?.('email', message));
 
     // 11) FINAL DECISION + CONFIDENCE
-    // Strict ownership (Part E): no verified HIGH owner => RESEARCH_MORE, never OUTREACH_READY.
+    // COMMERCIAL-INTELLIGENCE MODEL (priority reset):
+    //   The core product is COMPANY → PUBLIC TECHNICAL PROBLEM → DIAGNOSTIC OPPORTUNITY.
+    //   A person/email is NOT required — the human operator handles contact manually.
+    //
+    //   OUTREACH_READY = defensible public finding + claim QA passed
+    //   RESEARCH_MORE   = no defensible finding yet
+    //   NO_GO           = ICP says the company is not an engineering target
+    //
     const ownerHigh = !!selectedOwner && selectedOwner.confidence === 'HIGH';
-    const hasProfChannel = contacts.some(c => c.type === 'PROFESSIONAL_EMAIL' || c.type === 'PROFESSIONAL_PROFILE');
+    const ownerVerified = !!selectedOwner && !!selectedOwner.finding_link;
+
+    // Actionable finding gate: only OBSERVED_* and POSSIBLE_* findings
+    // represent active technical behaviors requiring outreach.
     const findingDefensible = !!deepFinding && deepFinding.confidence !== 'LOW'
-      && !['GENERIC_ENGINEERING_ARTICLE', 'UNEXPECTED_PUBLIC_BEHAVIOR', 'CONFLICTING_EVIDENCE'].includes(deepFinding.finding_type);
+      && !['GENERIC_ENGINEERING_ARTICLE', 'UNEXPECTED_PUBLIC_BEHAVIOR', 'CONFLICTING_EVIDENCE'].includes(deepFinding.finding_type)
+      && !NON_ACTIONABLE_FINDING_TYPES.has(deepFinding.finding_type);
+
+    // Claim QA: the finding must carry concrete evidence IDs (never a signal-only claim).
+    const findingHasEvidence = !!deepFinding && deepFinding.evidence_ids.length > 0;
+    const claimQAPassed = findingDefensible && findingHasEvidence;
+
+    // OWNER RELEVANCE gate (retained for owner selection relevance, not a hard
+    // OUTREACH_READY gate): the owner's evidence must EXPLICITLY connect them
+    // to the finding's technical domain.
+    const ownerRelevant = !!selectedOwner && !!selectedOwner.finding_link
+      && ownerEvidenceMatchesDomain(
+        selectedOwner as any,
+        deepFinding?.finding_type || authoritativeFinding?.finding_type || ''
+      );
+
+    // Diagnostic opportunity generation (company → problem, NOT person-first)
+    const diagnosticOpportunity = claimQAPassed
+      ? buildOpportunity(
+          surface.company, parsed.hostname, deepFinding, caseRef.evidence,
+          signals, surface.homepage
+        )
+      : null;
+
+    if (diagnosticOpportunity) {
+      auditTrail.push(`DIAGNOSTIC_OPPORTUNITY: ${diagnosticOpportunity.problem_type} | relevance=${diagnosticOpportunity.commercial_relevance}`);
+      this.onProgress?.('findings', `diagnostic opportunity: ${diagnosticOpportunity.problem_type} (${diagnosticOpportunity.commercial_relevance})`);
+    }
 
     let decision: DeepDecision;
     if (icp.overall === 'NO_GO') {
       decision = 'NO_GO';
-    } else if (findingDefensible && ownerHigh && hasProfChannel && email.generated) {
+    } else if (claimQAPassed) {
+      // Finding-first: a defensible, evidence-backed finding is sufficient.
+      // Contactability (owner/email) is optional — the human handles contact.
       decision = 'OUTREACH_READY';
+    } else if (findingDefensible && !findingHasEvidence) {
+      decision = 'RESEARCH_MORE';
+      auditTrail.push('Finding defensible but lacks evidence IDs (signal-only) — RESEARCH_MORE.');
     } else {
       decision = 'RESEARCH_MORE';
+    }
+
+    // Owner-related blockers are recorded as informational (not gating).
+    if (decision === 'OUTREACH_READY' && findingDefensible && !ownerHigh) {
+      auditTrail.push(`OWNER_NOT_REQUIRED: finding is diagnostic-ready (${deepFinding?.finding_type}); contact to be handled manually.`);
+    }
+    if (decision === 'OUTREACH_READY' && findingDefensible && ownerHigh && !hasOwnerVerifiedEmail) {
+      auditTrail.push(`OWNER_VERIFIED_CONTACT_MISSING: owner=${selectedOwner?.name}, contact_status=${contactStatus} (diagnostic opportunity still valid — human contacts manually).`);
+      this.onProgress?.('contactability', `Owner verified but no owner-linked email found (contact_status: ${contactStatus}). Diagnostic opportunity is valid; contact to be handled manually.`);
     }
 
     let confidence: DeepConfidence;
@@ -611,6 +772,7 @@ export class DeepProspectBuilder {
       selected_owner: selectedOwner ? { ...selectedOwner, deep_owner_provenance: op.provenance } : null,
       owner_evidence: selectedOwner?.owner_evidence || [],
       contactability: contacts,
+      contact_status: contactStatus,
       findings: caseRef.finding_classification || null,
       deep_finding: deepFinding,
       evidence: caseRef.evidence,
@@ -620,6 +782,7 @@ export class DeepProspectBuilder {
       email_draft: email,
       decision,
       confidence,
+      diagnostic_opportunity: diagnosticOpportunity,
       growjo_data: this.growjoData ?? null,
       provider_data: this.providerCompanies ?? null,
       resolution: this.resolution ?? null,
@@ -640,6 +803,9 @@ export class DeepProspectBuilder {
       audit_trail: auditTrail,
       case_ref: caseRef
     };
+
+    // Build outreach card (problem-first, person secondary)
+    prospect.outreach_card = buildOutreachCardFields(prospect, diagnosticOpportunity) as any;
 
     prospect.artifact_path = this.persistArtifact(prospect, parsed.hostname);
 
@@ -704,8 +870,9 @@ export class DeepProspectBuilder {
       qualification_reasons: [reason], public_surface: surface, technical_signals: [],
       documented_facts: [], public_observations: [], inferences: [], people: [],
       owner_candidates: [], selected_owner: null, owner_evidence: [], contactability: [],
-      findings: null, deep_finding: null, evidence: [], primary_angle: 'No surface discovered.', secondary_angle: null,
+      contact_status: 'NO_VERIFIED_CONTACT', findings: null, deep_finding: null, evidence: [], primary_angle: 'No surface discovered.', secondary_angle: null,
       recommended_subjects: [], email_draft: email as any, decision: 'NO_GO', confidence: 'LOW',
+      diagnostic_opportunity: null, outreach_card: {},
       growjo_data: this.growjoData ?? null, provider_data: this.providerCompanies ?? null, resolution: this.resolution ?? null,
       github_activity: [], activity_timeline: [],
       data_sufficiency: { sufficient: false, needs_live_research: false, missing: [], stale: [], reasons: [reason] },
@@ -869,12 +1036,16 @@ export class DeepProspectBuilder {
       /iso\s*27001|soc\s*2|pci\s*dss|hipaa|gdpr|fedramp|nist|iso\s*27001/i.test(s.excerpt)
     );
     if (securitySig) {
+      // Extract just the certification names, stripping page noise like
+      // "Frequently asked questions." that co-occurs on the security page.
+      const certMatch = securitySig.excerpt.match(/(iso\s*27001|soc\s*2|pci\s*dss|hipaa|gdpr|fedramp|nist(?:\s*\d+)?)/gi);
+      const certText = certMatch ? certMatch.map(c => c.toUpperCase()).join(', ') : 'compliance certifications';
       found.push(this.deepFinding(
         'DOCUMENTED_SECURITY_POSTURE', 'MEDIUM',
         `Public security/compliance page documents certifications on ${securitySig.source_url}.`,
         this.sigEvidence(securitySig, src),
         this.signalUrls(securitySig),
-        `The company's public security page documents compliance certifications (${securitySig.excerpt.slice(0, 120)}). This is a published technical posture statement, not a vulnerability claim.`,
+        `The company's public security page documents compliance certifications (${certText}). This is a published technical posture statement, not a vulnerability claim.`,
         'Verify the certifications are current before referencing; treat as organizational security context.',
         'MEDIUM', 'MEDIUM', 'HIGH', 'MEDIUM', 'HIGH', 'MEDIUM'
       ));
@@ -951,19 +1122,40 @@ export class DeepProspectBuilder {
       ));
     }
 
-    // Observed latency: >= 3 observations, slow and reproducible.
-    const slowObs = src.filter(e => (e.latency_ms || 0) > 0 && ((e.baseline_latency_ms && e.latency_ms! > e.baseline_latency_ms * 2) || (e.latency_ms! > 1000)) && e.repeatable);
+    // Observed latency: requires STABILITY — not just a single spike.
+    // A defensible latency finding requires:
+    //   1. >= 3 observations with elevated latency (≥1000ms)
+    //   2. EACH observation must be individually repeatable (slow samples
+    //      reproduced within its own sample set) — this filters transient
+    //      network variation vs. a REAL_SERVER_SIDE_PATTERN
+    //   3. median latency ≥ 1500ms (bounded observation window)
+    //   4. latency_samples present on each (proves reproducibility)
+    // This distinguishes a real performance regression from one-off network jitter.
+    const slowObs = src.filter(e =>
+      (e.latency_ms || 0) > 0
+      && e.repeatable                         // slow pattern reproduced across samples
+      && e.latency_samples                    // samples exist (proof of repeat)
+      && e.latency_samples.length >= 3        // at least 3 total samples
+      && e.latency_ms! >= 1000                // this observation was slow
+      && e.latency_samples.filter(s => s >= 1000).length >= 2  // majority slow
+    );
     if (slowObs.length >= 3) {
-      const p95 = slowObs.map(e => e.latency_ms!).sort((a, b) => a - b);
-      const med = p95[Math.floor(p95.length / 2)];
-      found.push(this.deepFinding(
-        'OBSERVED_LATENCY', 'MEDIUM',
-        `Repeated slow public responses (median observed ${med}ms across ${slowObs.length} sample(s)).`,
-        slowObs, slowObs.map(e => e.public_url),
-        `Read-only requests to ${slowObs.length} public endpoint(s) returned with elevated latency (median ${med}ms), reproducible across requests.`,
-        'Re-measure latency at time of outreach; treat as a performance signal, not an outage.',
-        'MEDIUM', 'MEDIUM', 'HIGH', 'MEDIUM', 'HIGH', 'MEDIUM'
-      ));
+      const latencies = slowObs.map(e => e.latency_ms!).sort((a, b) => a - b);
+      const med = latencies[Math.floor(latencies.length / 2)];
+      // Bounded observation window: median must be ≥ 1500ms to qualify.
+      // A single slow observation with fast follow-ups is NOT stable.
+      if (med >= 1500) {
+        found.push(this.deepFinding(
+          'OBSERVED_LATENCY', 'MEDIUM',
+          `Stable slow latency detected (median ${med}ms, ≥3 observations, reproducible within each window).`,
+          slowObs, slowObs.map(e => e.public_url),
+          `Read-only requests to ${slowObs.length} public endpoint(s) returned with consistently elevated latency (median ${med}ms, each with ≥2 slow reproductions). This is an observed server-side performance pattern, not a single sample.`,
+          'Re-measure latency at time of outreach; treat as a performance signal, not an outage.',
+          'MEDIUM', 'MEDIUM', 'HIGH', 'MEDIUM', 'HIGH', 'MEDIUM'
+        ));
+      }
+      // If slowObs exist but median < 1500ms, the slowness is not stable —
+      // do NOT produce OBSERVED_LATENCY. Fall through to RESEARCH_MORE.
     }
 
     // Public exposure: repeatable unauthenticated behavior with explicit exposure language.
@@ -1088,9 +1280,37 @@ export class DeepProspectBuilder {
 
   private sigEvidence(sig: DeepSignal, observations: Evidence[]): Evidence[] {
     if (sig.related_evidence_ids && sig.related_evidence_ids.length) {
-      return observations.filter(e => sig.related_evidence_ids!.includes(e.id));
+      // Enrich linked evidence records with the signal's actual excerpt text
+      // so the claim provenance chain is directly auditable from the evidence
+      // record (not an indirect HTTP 200 + signal.excerpt chain).
+      return observations
+        .filter(e => sig.related_evidence_ids!.includes(e.id))
+        .map(e => DeepProspectBuilder.enrichEvidenceWithExcerpt(e, sig.excerpt));
     }
-    return observations.filter(e => (e.public_url || '').replace(/\/$/, '') === (sig.source_url || '').replace(/\/$/, ''));
+    // When no linked evidence IDs exist, match by URL and enrich.
+    const byUrl = observations
+      .filter(e => (e.public_url || '').replace(/\/$/, '') === (sig.source_url || '').replace(/\/$/, ''))
+      .map(e => DeepProspectBuilder.enrichEvidenceWithExcerpt(e, sig.excerpt));
+    // No fallback creation: a signal without real observation evidence does NOT
+    // manufacture evidence IDs (no-fabrication rule). If empty, the finding's
+    // evidence_ids will be [] and the valid filter will exclude it.
+    return byUrl;
+  }
+
+  /** Enrich an existing evidence record with the signal's excerpt text so
+   * the claimable observation is directly stored in the evidence record
+   * (not scattered across HTTP 200 + signal.excerpt). */
+  private static enrichEvidenceWithExcerpt(ev: Evidence, excerpt: string): Evidence {
+    const text = (ev.evidence_text || ev.raw_observation || ev.observed_behavior || '').toString().replace(/\s+/g, ' ').trim();
+    return {
+      ...ev,
+      observed_behavior: ev.observed_behavior === `HTTP ${ev.status || 200} observed`
+        ? `${ev.observed_behavior} — ${excerpt}`
+        : ev.observed_behavior,
+      evidence_text: (text && text !== `HTTP ${ev.status || 200} observed`)
+        ? text
+        : excerpt,
+    };
   }
 
   private persistArtifact(prospect: DeepProspect, company: string): string {

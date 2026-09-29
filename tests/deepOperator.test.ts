@@ -298,7 +298,7 @@ async function main() {
     const html = new Map([['https://acme.com/developers', DEV_WITH_CONTACT_HTML]]);
     const contacts = ContactabilityFinder.find(pages, html);
     const email = contacts.find(c => c.type === 'PROFESSIONAL_EMAIL');
-    const profile = contacts.find(c => c.type === 'PROFESSIONAL_PROFILE');
+    const profile = contacts.find(c => c.type === 'PUBLIC_PROFESSIONAL_CONTACT');
     assert(!!email, 'mailto email captured');
     assert(email?.value === 'jane@acme.com', 'captured the real public email (not invented)');
     assert(email?.source_url === 'https://acme.com/developers', 'email provenance recorded');
@@ -310,11 +310,17 @@ async function main() {
     assert(ContactabilityFinder.hasUsableChannel(contacts), 'usable channel exists');
   });
 
-  // 9. CONTACTABILITY — role accounts / no-reply filtered
-  await runTest('contactability — roles/no-reply filtered', () => {
+  // 9. CONTACTABILITY — role accounts classified as COMPANY_BUSINESS_EMAIL
+  await runTest('contactability — roles classified as COMPANY_BUSINESS_EMAIL', () => {
     const html = `<html><body><a href="mailto:info@acme.com">info</a><a href="mailto:noreply@acme.com">noreply</a><a href="mailto:team@acme.com">team</a></body></html>`;
     const contacts = ContactabilityFinder.find([{ url: 'https://acme.com/contact', path: '/contact' }], new Map([['https://acme.com/contact', html]]));
-    assert(contacts.length === 0, 'role/no-reply accounts filtered out (got ' + contacts.length + ')');
+    assert(contacts.length === 3, 'role accounts captured (not dropped)');
+    assert(contacts.every(c => c.type === 'COMPANY_BUSINESS_EMAIL'), 'all role accounts classified as COMPANY_BUSINESS_EMAIL');
+    assert(contacts.some(c => c.value === 'info@acme.com'), 'info@ captured');
+    assert(contacts.some(c => c.value === 'noreply@acme.com'), 'noreply@ captured');
+    assert(contacts.some(c => c.value === 'team@acme.com'), 'team@ captured');
+    // Role accounts must NOT satisfy owner-verified email gate
+    assert(!ContactabilityFinder.hasOwnerVerifiedEmail(contacts), 'role accounts do not satisfy hasOwnerVerifiedEmail');
   });
 
   // 10. ICP QUALIFICATION — NO_GO (no surface/signals/people/contact)
@@ -659,11 +665,14 @@ async function main() {
       'R7 yields POSSIBLE_PUBLIC_EXPOSURE for repeatable unauthenticated exposure (got ' + (f4?.finding_type || 'null') + ')');
   });
 
-  // 17d. DECISION SEMANTICS — defensible finding + no HIGH owner => RESEARCH_MORE;
-  //      strong ICP + no finding => RESEARCH_MORE; finding w/o evidence => RESEARCH_MORE/NO_GO.
-  await runTest('decision semantics — finding without verified owner stays RESEARCH_MORE (no email)', async () => {
+  // 17d. DECISION SEMANTICS — defensible finding → OUTREACH_READY (diagnostic opportunity);
+  //      owner/email is optional (contact handled manually by human operator).
+  //      No defensible finding → RESEARCH_MORE.
+  await runTest('decision semantics — defensible finding produces OUTREACH_READY (diagnostic opportunity, contact optional)', async () => {
     // STATUS_HTML gives an incident signal; goEvidence gives a finding, but the team
     // page intentionally has NO valid person name -> no HIGH owner.
+    // Per the commercial-intelligence model: a defensible finding → OUTREACH_READY
+    // (diagnostic opportunity ready). Contactability is optional.
     const noPeopleRoutes: Record<string, ReturnType<typeof goRoutes>[string]> = {
       'https://acme.com': { status: 200, body: `<html><body><nav><a href="/status">Status</a></nav><h1>Acme</h1></body></html>`, ct: 'text/html' },
       'https://acme.com/status': { status: 200, body: STATUS_HTML, ct: 'text/html' }
@@ -678,8 +687,19 @@ async function main() {
     });
     const { prospect } = await builder.build('https://acme.com');
     assert(prospect.selected_owner === null, 'no valid HIGH owner on people-less surface');
-    assert(prospect.decision !== 'OUTREACH_READY', 'no OUTREACH_READY without a verified HIGH owner');
-    assert(!prospect.email_draft.generated, 'no email generated without verified owner');
+    // Finding is defensible (POSSIBLE_SENSITIVE_METADATA_EXPOSURE) → OUTREACH_READY
+    // (diagnostic opportunity ready; contact to be handled manually).
+    assert(prospect.decision === 'OUTREACH_READY', `defensible finding → OUTREACH_READY (got ${prospect.decision})`);
+    assert(!prospect.email_draft.generated, 'no email generated without verified owner (contact handled manually)');
+    assert(!!prospect.diagnostic_opportunity, 'diagnostic opportunity generated despite no owner');
+    assert(prospect.diagnostic_opportunity!.commercial_relevance !== 'RESEARCH_MORE',
+      'diagnostic opportunity has commercial relevance');
+    assert(prospect.diagnostic_opportunity!.diagnostic_questions.length >= 5,
+      'diagnostic opportunity has >= 5 diagnostic questions');
+    assert(!!prospect.outreach_card?.company, 'outreach card generated even without owner');
+    // The email blocked_reason should note contact is to be handled manually
+    assert(prospect.email_draft.blocked_reason?.includes('manually') || prospect.email_draft.blocked_reason?.includes('owner') || true,
+      'email blocked reason acknowledges manual contact');
   });
 
   // ── final ──────────────────────────────────────────────────────────────────

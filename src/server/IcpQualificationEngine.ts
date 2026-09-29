@@ -169,6 +169,10 @@ export class IcpQualificationEngine {
     });
 
     // ── Strict gate ─────────────────────────────────────────────────────────
+    // COMMERCIAL-INTELLIGENCE MODEL: The core product is
+    //   COMPANY → PUBLIC TECHNICAL PROBLEM → DIAGNOSTIC OPPORTUNITY
+    // A defensible finding is the primary gate. Owner/email (contactability)
+    // is secondary — the human operator handles contact manually.
     const minDim = (d: IcpDimension) => d.score;
     const industryOk = industryFitScore >= 1;
     const technicalOk = techComplexityScore >= 1 || productRelevanceScore >= 1;
@@ -200,25 +204,16 @@ export class IcpQualificationEngine {
         overall = 'NO_GO';
         gated_reason = reasons.join(' ');
       }
-    } else if (reasons.length > 0) {
+    } else if (!findingIsDefensible) {
+      // Has technical surface but no defensible actionable finding → RESEARCH_MORE.
       overall = 'RESEARCH_MORE';
-      gated_reason = reasons.join(' ');
+      const detail = reasons.length ? reasons.join(' ') : '';
+      gated_reason = detail + (detail ? ' ' : '') + 'no defensible actionable finding (OBSERVED_*/POSSIBLE_* required for outreach).';
     } else {
-      // All gates satisfied — require a defensible finding OR HIGH owner for a true OUTREACH_READY.
-      const hasDefensibleFinding = findingIsDefensible;
-      const hasHighOwner = ownerScore >= 2;
-      const hasProfContact = profChannel;
-      if (hasDefensibleFinding && hasHighOwner && hasProfContact) {
-        overall = 'OUTREACH_READY';
-        gated_reason = undefined;
-      } else {
-        overall = 'RESEARCH_MORE';
-        const detail: string[] = [];
-        if (!hasDefensibleFinding) detail.push('no defensible finding (engine finding required for outreach).');
-        if (!hasHighOwner) detail.push('owner confidence below HIGH.');
-        if (!hasProfContact) detail.push('no high-confidence professional contact channel.');
-        gated_reason = detail.join(' ');
-      }
+      // COMMERCIAL-INTELLIGENCE MODEL: a defensible actionable finding is sufficient.
+      // Contactability (owner/email) is OPTIONAL — the human handles contact manually.
+      overall = 'OUTREACH_READY';
+      gated_reason = undefined;
     }
 
     const sum = dims.reduce((a, d) => a + d.score, 0);

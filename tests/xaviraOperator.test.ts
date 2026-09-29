@@ -603,7 +603,7 @@ async function main() {
     assert(out.includes('Owner evidence:'), 'deep why owner shows owner_evidence');
     assert(out.includes('Confidence:'), 'deep why owner shows confidence');
     assert(out.includes('Finding link:'), 'deep why owner shows finding_link');
-    assert(out.includes('platform engineering'), 'deep why owner finding_link resolves to a subsystem');
+    assert(out.includes('public API surface'), 'deep why owner finding_link resolves to a subsystem');
   });
 
   // 20. draft email (deep, OUTREACH_READY) — 9-section body + CLAIM→EVIDENCE map

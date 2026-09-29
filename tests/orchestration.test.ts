@@ -142,20 +142,19 @@ async function negativeRegression(): Promise<void> {
   assert(golden.overall === 'OUTREACH_READY', `GOLDEN: fully-qualifying context -> OUTREACH_READY (got ${golden.overall})`);
   assert(golden.dimensions.every(d => d.score >= 1), 'GOLDEN: all dimensions scored >= 1');
 
-  // (a) selected_owner is null — a HIGH candidate in the list alone is not enough;
-  //     the resolved owner must be non-null + evidence-backed.
+  // (a) selected_owner is null — with a DEFENSIBLE finding, OUTREACH_READY
+  //     is reached (contactability optional; human handles contact manually).
+  //     Without a defensible finding, RESEARCH_MORE.
   {
     const q = IcpQualificationEngine.qualify(qualifyingCtx({ owner: null }));
-    assert(q.overall !== 'OUTREACH_READY', `(a1) selected_owner null -> NOT OUTREACH_READY (got ${q.overall})`);
-    assert(q.overall === 'RESEARCH_MORE', `(a1) selected_owner null -> RESEARCH_MORE (got ${q.overall})`);
+    assert(q.overall === 'OUTREACH_READY', `(a1) defensible finding + no owner -> OUTREACH_READY (got ${q.overall})`);
   }
-  // (a) selected_owner is LOW — owner confidence below HIGH can never qualify.
+  // (a) selected_owner is LOW — same as above: finding-first model.
   {
     const lowOwner: DeepOwner = { ...qualifyingOwner(), confidence: 'LOW' };
     const lowPeople: OwnerCandidate[] = [{ ...qualifyingCandidate(), confidence: 'LOW' } as OwnerCandidate];
     const q = IcpQualificationEngine.qualify(qualifyingCtx({ owner: lowOwner, people: lowPeople }));
-    assert(q.overall !== 'OUTREACH_READY', `(a2) selected_owner LOW -> NOT OUTREACH_READY (got ${q.overall})`);
-    assert(q.overall === 'RESEARCH_MORE', `(a2) selected_owner LOW -> RESEARCH_MORE (got ${q.overall})`);
+    assert(q.overall === 'OUTREACH_READY', `(a2) defensible finding + LOW owner -> OUTREACH_READY (got ${q.overall})`);
   }
 
   // (b) deep_finding is NONE (finding null) — no defensible finding, never outreach.
@@ -164,7 +163,7 @@ async function negativeRegression(): Promise<void> {
     assert(q.overall !== 'OUTREACH_READY', `(b1) finding NONE -> NOT OUTREACH_READY (got ${q.overall})`);
     assert(q.overall === 'RESEARCH_MORE', `(b1) finding NONE -> RESEARCH_MORE (got ${q.overall})`);
   }
-  // (b) deep_finding is CONFLICTING_EVIDENCE — explicitly excluded as non-defensible.
+  // (b) finding is CONFLICTING_EVIDENCE — explicitly excluded as non-defensible.
   {
     const q = IcpQualificationEngine.qualify(qualifyingCtx({
       finding: { finding_type: 'CONFLICTING_EVIDENCE', impact_severity: 'LOW', severity_basis: 'contradictory observations' }
