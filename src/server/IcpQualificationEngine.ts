@@ -195,8 +195,8 @@ export class IcpQualificationEngine {
     const surfaceEmpty = ctx.surface.discovered_pages.length <= 1 && techPages === 0;
     const noProspectSignal = !signalOk && !ownerOk && !contactOk && !technicalOk;
 
-    if (!industryOk || (!signalOk && !ownerOk && !contactOk)) {
-      // Clearly not a high-precision target.
+    if (!industryOk && !findingIsDefensible) {
+      // Not a tech target AND no defensible finding → NO_GO
       if (surfaceEmpty || noProspectSignal) {
         overall = 'NO_GO';
         gated_reason = 'Not a qualifying engineering/developer target; no technical surface, signal, owner, or contact discovered.';
@@ -205,7 +205,7 @@ export class IcpQualificationEngine {
         gated_reason = reasons.join(' ');
       }
     } else if (!findingIsDefensible) {
-      // Has technical surface but no defensible actionable finding → RESEARCH_MORE.
+      // Has some technical surface but no defensible finding → RESEARCH_MORE.
       overall = 'RESEARCH_MORE';
       const detail = reasons.length ? reasons.join(' ') : '';
       gated_reason = detail + (detail ? ' ' : '') + 'no defensible actionable finding (OBSERVED_*/POSSIBLE_* required for outreach).';
