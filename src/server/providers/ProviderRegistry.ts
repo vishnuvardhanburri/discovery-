@@ -18,6 +18,7 @@
  */
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, Provenance, SourceEntry } from './Model';
 import { CompanyDataProvider, type ProviderLookupResult } from './ProviderInterface';
+import { ResearchPolicyManager } from '../ResearchPolicyManager';
 
 export interface ProviderConfig {
   /** Unique key for this provider instance. */
@@ -112,6 +113,14 @@ export class ProviderRegistry {
 
     for (const pc of orderedProviders) {
       if (!pc.provider.enabled) continue;
+
+      // POLICY GUARD: Block paid providers if research mode is FREE_ONLY
+      if (!ResearchPolicyManager.isProviderAllowed(pc.provider.costClass)) {
+        console.log(`[POLICY_BLOCK] Provider ${pc.key} blocked by policy: ${ResearchPolicyManager.getBlockedReason()}`);
+        tried.push(`${pc.key}:BLOCKED_BY_POLICY`);
+        continue;
+      }
+
       tried.push(pc.key);
       try {
         if (pc.provider.capabilities.resolveCompany) {
@@ -143,6 +152,13 @@ export class ProviderRegistry {
     const results: CanonicalCompany[] = [];
     for (const pc of this.providers) {
       if (!pc.provider.enabled || !pc.provider.capabilities.searchCompanies) continue;
+
+      // POLICY GUARD
+      if (!ResearchPolicyManager.isProviderAllowed(pc.provider.costClass)) {
+        console.log(`[POLICY_BLOCK] Provider ${pc.key} blocked by policy: ${ResearchPolicyManager.getBlockedReason()}`);
+        continue;
+      }
+
       try {
         const hits = await pc.provider.searchCompanies(query);
         results.push(...hits);
@@ -169,6 +185,13 @@ export class ProviderRegistry {
     // 2. Query each contact-capable provider
     for (const pc of this.providers) {
       if (!pc.provider.enabled || !pc.provider.capabilities.findContacts) continue;
+
+      // POLICY GUARD
+      if (!ResearchPolicyManager.isProviderAllowed(pc.provider.costClass)) {
+        console.log(`[POLICY_BLOCK] Provider ${pc.key} blocked by policy: ${ResearchPolicyManager.getBlockedReason()}`);
+        continue;
+      }
+
       try {
         const found = await pc.provider.findContacts(person);
         contacts.push(...found);

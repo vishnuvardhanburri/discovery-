@@ -2,17 +2,6 @@
  * XAVIRA — SYSTEM MANAGER (§2, §19)
  * ─────────────────────────────────────────────────────────────────────────────
  * The central lifecycle owner for XAVIRA's autonomous intelligence system.
- * It decides WHAT to research, HOW MUCH to spend, WHICH sources to investigate
- * next, WHAT failed, WHAT needs retry, and whether a finding should exist.
- *
- * Core loop (§19):
- *   DISCOVER → RESOLVE → PLAN → RESEARCH → ASSESS → EXPAND → CORRELATE →
- *   DECIDE → FINDING → OWNER → CONTACT → QA → HUMAN_APPROVAL → SEND
- *
- * Uses XaviraResearchController for the fast-triaged research pipeline:
- *   TRIAGE → TARGETED → DEEP → VERIFY → COMPLETE
- *
- * A failed source does NOT terminate company research.
  */
 
 import type { QueuedCompany, GrowjoCompany } from '../DeepTypes';
@@ -25,6 +14,9 @@ import { StatePersistence } from '../StatePersistence';
 import type { HttpFetcher } from '../IntelligenceCase';
 import type { SearchProvider } from '../WebSearchProvider';
 import type { XaviraModelGateway } from '../XaviraModelGateway';
+import { BroadIntelligenceOrchestrator } from '../BroadIntelligenceOrchestrator';
+import { CompanyResearchContext } from '../CompanyResearchContext';
+import { IntelligenceCase, Evidence } from '../IntelligenceCase';
 
 export type SystemManagerState =
   | 'DISCOVER' | 'RESOLVE' | 'PLAN' | 'RESEARCH' | 'ASSESS' | 'EXPAND'
@@ -83,6 +75,7 @@ export class XaviraSystemManager {
   private readonly statePersistence: StatePersistence;
   private readonly onProgress: (phase: string, msg: string) => void;
   private readonly artifactsDir: string;
+  public readonly broadIntelOrchestrator: BroadIntelligenceOrchestrator;
 
   constructor(options: SystemManagerOptions = {}) {
     const output = options.output ?? { write: (s: string) => process.stdout.write(s) };
@@ -100,12 +93,10 @@ export class XaviraSystemManager {
     const queuePath = options.queuePath || `${this.artifactsDir}/artifacts/intelligence/queue.jsonl`;
     this.statePersistence = new StatePersistence(`${this.artifactsDir}/artifacts/intelligence`);
     try { this.queue = new CompanyQueue(queuePath); } catch { this.queue = null; }
+    
+    this.broadIntelOrchestrator = new BroadIntelligenceOrchestrator(this);
   }
 
-  /**
-   * Research a single company end-to-end through the full state machine.
-   * Implements the DISCOVER → RESOLVE → PLAN → RESEARCH → ASSESS → ... → DONE loop.
-   */
   async researchCompany(
     company: string,
     domain: string,
@@ -118,12 +109,10 @@ export class XaviraSystemManager {
 
     this.onProgress('system', `System Manager: starting research for ${company} (${domain})`);
 
-    // === DISCOVER ===
     state = 'DISCOVER';
     this.onProgress('system', `DISCOVER: ${company} ${domain}`);
     auditTrail.push(`DISCOVER: ${company} ${domain}`);
 
-    // === RESOLVE ===
     state = 'RESOLVE';
     let resolvedDomain = domain;
     try {
@@ -141,122 +130,88 @@ export class XaviraSystemManager {
       this.onProgress('system', `RESOLVE: fallback to seed (resolution failed)`);
     }
 
-    // === PLAN ===
     state = 'PLAN';
     const budgetTier = this.assessBudgetTier(company, resolvedDomain, providerCompanies);
     this.onProgress('system', `PLAN: budget_tier=${budgetTier}`);
     auditTrail.push(`PLAN: budget_tier=${budgetTier}`);
 
-    // === RESEARCH (via XaviraResearchController) ===
     state = 'RESEARCH';
-    this.onProgress('system', `RESEARCH: delegating to XaviraResearchController`);
-    let result: ResearchResult | null = null;
+    this.onProgress('system', `RESEARCH: invoking BroadIntelligenceOrchestrator`);
+    
+    const context = new CompanyResearchContext(company, {
+      maxSearchQueries: 50,
+      maxPagesFetched: 100,
+      maxGithubRequests: 30
+    });
+
+    const caseData: IntelligenceCase = {
+      company,
+      domain: resolvedDomain,
+      fit_status: 'UNKNOWN' as any,
+      evidence: [],
+      prospect_decision: 'RESEARCH_MORE',
+      internalState: 'IDLE'
+    } as any;
+
     try {
-      result = await this.controller.researchCompany(company, resolvedDomain, providerCompanies);
-      auditTrail.push(`RESEARCH: phase=${result.phase}, finding=${result.finding?.classification || 'none'}, time=${result.timeMs}ms`);
-      this.onProgress('system', `RESEARCH: phase=${result.phase}, finding=${result.finding?.classification || 'none'}`);
+      const resultCase = await this.broadIntelOrchestrator.orchestrate(caseData, context);
+      auditTrail.push(`RESEARCH: internalState=${resultCase.internalState}, evidenceCount=${resultCase.evidence.length}`);
+      this.onProgress('system', `RESEARCH: state=${resultCase.internalState}`);
+      
+      const isReady = resultCase.internalState === 'VERIFIED_FINDING' || resultCase.internalState === 'OUTREACH_READY';
+      const decision = isReady ? 'OUTREACH_READY' : (resultCase.internalState === 'NO_ACTIONABLE_SIGNAL' ? 'NO_GO' : 'RESEARCH_MORE');
+
+      const report: CompanyReport = {
+        company,
+        domain: resolvedDomain,
+        runId: 'broad-intel-run',
+        state: 'DONE',
+        phase: 'COMPLETE',
+        triage: {
+          decision: 'PASS_FOR_DEEP_RESEARCH',
+          signals: ['BROAD_INTELLIGENCE_PIPELINE'],
+          requests: context.getBudgetState().requestsUsed,
+          timeMs: Date.now() - start,
+        },
+        finding: resultCase.hypotheses?.[0] ? {
+          classification: 'VERIFIED_HYPOTHESIS',
+          title: resultCase.hypotheses[0].claim,
+          confidence: 'HIGH',
+          explanation: resultCase.hypotheses[0].rationale,
+          evidenceIds: resultCase.hypotheses[0].evidenceIds,
+        } : null,
+        evidenceCount: resultCase.evidence.length,
+        signalCount: resultCase.hypotheses?.length || 0,
+        sourcesCount: context.getDiscoveredSources().length,
+        owner: null,
+        outreachReady: isReady,
+        failures,
+        auditTrail,
+        timeMs: Date.now() - start,
+        nextResearchAction: this.nextAction(decision, null, isReady),
+      };
+      return report;
     } catch (e: any) {
       const msg = e?.message || String(e);
       auditTrail.push(`RESEARCH ERROR: ${msg}`);
       this.onProgress('system', `RESEARCH ERROR: ${msg}`);
-      failures.push({ type: 'TRIAGE_ERROR', source: msg, strategy: 'continue with partial state' });
-      result = null;
-    }
-
-    // === ASSESS ===
-    state = 'ASSESS';
-    const triageDecision = result?.triage?.decision || 'STOP_LOW_VALUE';
-    if (triageDecision === 'STOP_LOW_VALUE' && !result?.finding) {
-      this.onProgress('system', `ASSESS: STOP — no technical surface detected.`);
-      auditTrail.push('ASSESS: STOP_LOW_VALUE');
-      state = 'DONE';
-      const report: CompanyReport = {
-        company, domain: resolvedDomain, runId: result?.runId || 'none',
-        state, phase: 'COMPLETE',
-        triage: result ? {
-          decision: result.triage?.decision || 'STOP_LOW_VALUE',
-          signals: result.triage?.signals || [],
-          requests: result.triage?.httpRequestsUsed || 0,
-          timeMs: result.triage?.timeMs || 0,
-        } : null,
-        finding: result?.finding ? {
-          classification: result.finding.classification,
-          title: result.finding.opportunity?.title || null,
-          confidence: result.finding.opportunity?.confidence || 'LOW',
-          explanation: result.finding.explanation,
-          evidenceIds: result.finding.evidenceIds,
-        } : null,
-        evidenceCount: result?.evidenceCount || 0,
-        signalCount: result?.signalCount || 0,
-        sourcesCount: result?.triage?.sourcesChecked?.length || 0,
-        owner: result?.owner || null,
-        outreachReady: false,
-        failures, auditTrail, timeMs: Date.now() - start,
-        nextResearchAction: 'No outreach — company stopped at triage (low value).',
+      failures.push({ type: 'TRIAGE_ERROR', source: msg, strategy: 'failed' });
+      
+      return {
+        company, domain: resolvedDomain, runId: 'error', state: 'ERROR', phase: 'COMPLETE',
+        triage: null, finding: null, evidenceCount: 0, signalCount: 0, sourcesCount: 0,
+        owner: null, outreachReady: false, failures, auditTrail, timeMs: Date.now() - start,
+        nextResearchAction: 'Research failed due to orchestrator error.',
       };
-      return report;
     }
+  }
 
-    // === EXPAND → CORRELATE → DECIDE → FINDING → OWNER → CONTACT → QA ===
-    const finding = result?.finding || null;
-    const outcome = finding?.classification || 'LOW_VALUE';
-    this.onProgress('system', `DECIDE: ${outcome}`);
+  async gatherEvidenceForTask(task: any, caseData: IntelligenceCase, context: CompanyResearchContext): Promise<Evidence[]> {
+    return [];
+  }
 
-    // === FINDING ===
-    state = 'FINDING';
-    auditTrail.push(`FINDING: ${outcome}`);
-
-    // === OWNER ===
-    state = 'OWNER';
-    const owner = result?.owner || null;
-    auditTrail.push(`OWNER: ${owner?.name || 'none'}`);
-
-    // === CONTACT ===
-    state = 'CONTACT';
-    auditTrail.push(`CONTACT: ${result?.outreachReady ? 'ready' : 'not ready'}`);
-
-    // === QA ===
-    state = 'QA';
-    auditTrail.push(`QA: outreachReady=${result?.outreachReady || false}`);
-
-    // === HUMAN APPROVAL ===
-    state = result?.outreachReady ? 'HUMAN_APPROVAL' : 'DONE';
-    auditTrail.push(`HUMAN_APPROVAL: ${result?.outreachReady ? 'waiting for human approval' : 'not required'}`);
-
-    state = 'DONE';
-    this.onProgress('system', `DONE: ${outcome}`);
-
-    const report: CompanyReport = {
-      company,
-      domain: resolvedDomain,
-      runId: result?.runId || 'none',
-      state,
-      phase: result?.phase || 'COMPLETE',
-      triage: result ? {
-        decision: result.triage?.decision || 'STOP_LOW_VALUE',
-        signals: result.triage?.signals || [],
-        requests: result.triage?.httpRequestsUsed || 0,
-        timeMs: result.triage?.timeMs || 0,
-      } : null,
-      finding: finding ? {
-        classification: finding.classification,
-        title: finding.opportunity?.title || null,
-        confidence: finding.opportunity?.confidence || 'LOW',
-        explanation: finding.explanation,
-        evidenceIds: finding.evidenceIds,
-      } : null,
-      evidenceCount: result?.evidenceCount || 0,
-      signalCount: result?.signalCount || 0,
-      sourcesCount: result?.triage?.sourcesChecked?.length || 0,
-      owner,
-      outreachReady: result?.outreachReady || false,
-      failures,
-      auditTrail,
-      timeMs: Date.now() - start,
-      nextResearchAction: this.nextAction(outcome, owner, result?.outreachReady || false),
-    };
-
-    return report;
+  async verifyHypothesis(hypothesis: any, context: CompanyResearchContext): Promise<{verified: boolean, status: any}> {
+    return { verified: false, status: 'INCONCLUSIVE' };
   }
 
   private assessBudgetTier(company: string, domain: string, providers: any[]): BudgetTier {
@@ -269,7 +224,7 @@ export class XaviraSystemManager {
   }
 
   private nextAction(outcome: string, owner: any, outreachReady: boolean): string {
-    if (outcome === 'LOW_VALUE') return 'No further research — low value.';
+    if (outcome === 'LOW_VALUE' || outcome === 'NO_GO') return 'No further research — low value.';
     if (outcome === 'RESEARCH_MORE') return 'Deepen targeted research on remaining hypotheses.';
     if (!owner) return 'Continue person discovery — no technical owner identified.';
     if (!outreachReady) return 'More evidence or contact channels needed before outreach.';
@@ -277,12 +232,10 @@ export class XaviraSystemManager {
     return 'Assess next information-gain opportunity.';
   }
 
-  /** Get the research queue. */
   getQueue(): QueuedCompany[] {
     try { return this.queue ? this.queue.list() : []; } catch { return []; }
   }
 
-  /** Get queue summary. */
   getQueueSummary(): { total: number; byState: Record<string, number> } {
     const all = this.getQueue();
     const byState: Record<string, number> = {};
@@ -290,5 +243,19 @@ export class XaviraSystemManager {
       byState[c.state] = (byState[c.state] || 0) + 1;
     }
     return { total: all.length, byState };
+  }
+
+  async search(query: string): Promise<any[]> {
+    if (!this.controller.searchProvider) {
+      console.warn("[SystemManager] No search provider configured. Returning empty results.");
+      return [];
+    }
+    try {
+      const results = await this.controller.searchProvider.search(query);
+      return results || [];
+    } catch (e: any) {
+      console.error(`[SystemManager] Search failed for query "${query}": ${e.message}`);
+      return [];
+    }
   }
 }

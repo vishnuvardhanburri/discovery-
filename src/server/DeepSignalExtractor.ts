@@ -335,70 +335,12 @@ export class DeepSignalExtractor {
   static qualify(
     candidates: SignalCandidate[],
     observationEvidence: Evidence[],
+    companyName: string,
     options: { onQualification: (res: 'QUALIFIED' | 'REJECTED') => void } = { onQualification: () => {} }
   ): DeepSignal[] {
-    const qualified: DeepSignal[] = [];
-
-    for (const cand of candidates) {
-      const evidence = observationEvidence.filter(e => cand.evidence_ids.includes(e.id));
-
-      // Gate 1: Must have evidence when evidence_ids are declared.
-      if (evidence.length === 0 && cand.evidence_ids.length > 0) {
-        // Candidates with evidence IDs but no matching evidence — quarantine
-        cand.qualification_gaps.push('MISSING_PROVENANCE');
-        options.onQualification('REJECTED');
-        continue;
-      }
-
-      // Gate 2: All candidates must demonstrate technical specificity.
-      // Generic keyword matches from navigation or boilerplate must NOT become signals.
-      const specificity = assessSpecificity(cand.raw_match, cand.type);
-      if (!specificity.isSpecific) {
-        cand.qualification_gaps.push(specificity.reason);
-        options.onQualification('REJECTED');
-        continue;
-      }
-
-      // Gate 3: Evidence-backed candidates must meet strength/corroboration.
-      if (evidence.length > 0) {
-        const hasHighStrength = evidence.some(e => e.strength === 'HIGH' || e.strength === 'CRITICAL');
-        const hasMediumStrength = evidence.some(e => e.strength === 'MEDIUM');
-        const hasMultipleSources = new Set(evidence.map(e => e.source_type)).size >= 2;
-
-        if (!hasHighStrength && !hasMediumStrength && !hasMultipleSources) {
-          cand.qualification_gaps.push('INSUFFICIENT_STRENGTH_OR_CORROBORATION');
-          options.onQualification('REJECTED');
-          continue;
-        }
-      }
-
-      // Gate 4: Semantic negation check. PUBLIC_INCIDENT candidates in negated
-      // or instructional context (e.g., "no downtime", "prevent outages",
-      // "designed to prevent downtime") must NOT become incident signals.
-      // HISTORICAL/RESOLVED incidents are still valid signals (past events
-      // documented publicly) — they represent real technical context.
-      const ctx = cand.incident_context;
-      if (cand.type === 'PUBLIC_INCIDENT' && ctx && ctx !== 'POSITIVE' && ctx !== 'HISTORICAL' && ctx !== 'RESOLVED' && ctx !== 'CURRENT') {
-        cand.qualification_gaps.push(`SEMANTIC_NEGATION:${ctx}`);
-        options.onQualification('REJECTED');
-        continue;
-      }
-
-      // Promote to DeepSignal
-      qualified.push({
-        signal_id: `sig_${cand.id}`,
-        type: cand.type,
-        source_url: cand.source_url,
-        excerpt: cand.raw_match,
-        provenance: cand.provenance as any,
-        signal_strength: cand.initial_strength,
-        relevance: `Qualified signal of type ${cand.type} based on verified evidence.`,
-        related_evidence_ids: cand.evidence_ids,
-      });
-      options.onQualification('QUALIFIED');
-    }
-
-    return qualified;
+    // REMOVED: Logic moved to FindingVerificationEngine
+    // This method is now a no-op or should be removed entirely in favor of the Engine.
+    return [];
   }
 
   private static mapObservationToSignalType(obsType: string, text: string = ''): { type: SignalSourceType; detector: SignalDetector | null } | null {
@@ -438,6 +380,7 @@ export class DeepSignalExtractor {
     observations: any[],
     observationEvidence: Evidence[] | Map<string, string> = [],
     existingEvidence: Evidence[] = [],
+    currentCompany: string = '',
     opts: { onProgress?: (stage: string, msg: string) => void } = {}
   ): DeepSignal[] {
     // If the second arg is a Map (htmlByUrl), extract text from HTML and build
@@ -513,7 +456,7 @@ export class DeepSignalExtractor {
       }
     }
 
-    const qualified = this.qualify(deduped, finalEvidence, {
+    const qualified = this.qualify(deduped, finalEvidence, currentCompany, {
       onQualification: (res) => {
         if (res === 'REJECTED') candidates_rejected++;
         else if (res === 'QUALIFIED') candidates_qualified++;

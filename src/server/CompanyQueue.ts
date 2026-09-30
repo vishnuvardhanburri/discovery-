@@ -30,12 +30,10 @@ export class CompanyQueue {
   }
 
   private flush(): void {
-    // Write whole file atomically-ish (single write of all rows).
     const data = this.rows.map(r => JSON.stringify(r)).join('\n') + (this.rows.length ? '\n' : '');
     fs.writeFileSync(this.file, data, 'utf8');
   }
 
-  /** Number of companies currently in the queue. */
   count(state?: QueueState): number {
     return state ? this.rows.filter(r => r.state === state).length : this.rows.length;
   }
@@ -54,13 +52,11 @@ export class CompanyQueue {
     this.flush();
   }
 
-  /** Canonical domain key for dedupe. */
   static canonicalDomain(c: GrowjoCompany | { domain: string | null }): string | null {
     if (!c.domain) return null;
     return c.domain.replace(/^www\./, '').toLowerCase();
   }
 
-  /** Add Growjo companies to the queue, deduplicating by canonical domain. */
   enqueue(companies: GrowjoCompany[]): { added: number; duplicates: number } {
     let added = 0, duplicates = 0;
     for (const c of companies) {
@@ -88,7 +84,6 @@ export class CompanyQueue {
     return { added, duplicates };
   }
 
-  /** Enqueue a single company name (domain resolution pending). */
   enqueueName(companyName: string, domain: string | null = null): QueuedCompany {
     const canon = domain ? companyName + '|' + CompanyQueue.canonicalDomain({ domain }) : companyName;
     const exists = this.rows.find(r => r.company === companyName && (r.domain || '') === (domain || ''));
@@ -103,17 +98,20 @@ export class CompanyQueue {
     return row;
   }
 
-  /** Reserve the next QUEUED company for research (QUEUED -> RESOLVING). */
-  claimNext(): QueuedCompany | null {
+  claimNext(workerId?: string): QueuedCompany | null {
     const idx = this.rows.findIndex(r => r.state === 'QUEUED');
     if (idx < 0) return null;
     const row = this.rows[idx];
-    row.state = 'RESOLVING'; row.updated_at = new Date().toISOString();
+    row.state = 'RESOLVING'; 
+    row.updated_at = new Date().toISOString();
+    if (workerId) {
+      (row as any).worker_id = workerId;
+      (row as any).claimed_at = new Date().toISOString();
+    }
     this.save(row);
     return row;
   }
 
-  /** Persist resolution + advance to RESEARCHING. */
   markResolving(id: string, resolution: CompanyResolution): QueuedCompany | null {
     const row = this.byId(id);
     if (!row) return null;
@@ -124,7 +122,6 @@ export class CompanyQueue {
     return row;
   }
 
-  /** Persist prospect outcome + final decision. */
   markResearched(
     id: string,
     decision: DeepDecision,
@@ -147,7 +144,6 @@ export class CompanyQueue {
     return row;
   }
 
-  /** Manual override: approve a ready company for send. */
   approve(id: string): QueuedCompany | null {
     const row = this.byId(id);
     if (!row) return null;
@@ -155,7 +151,6 @@ export class CompanyQueue {
     return row;
   }
 
-  /** Mark a company as SENT (only after APPROVED). */
   markSent(id: string): QueuedCompany | null {
     const row = this.byId(id);
     if (!row || row.state !== 'APPROVED') return null;
@@ -164,8 +159,25 @@ export class CompanyQueue {
     return row;
   }
 
-  /** Resume list: everything not in a terminal state, in enqueue order. */
   pending(): QueuedCompany[] {
     return this.rows.filter(r => !['NO_GO', 'APPROVED', 'SENT'].includes(r.state));
+  }
+
+  /** Recovery: Re-queue companies stuck in RESOLVING or RESEARCHING for too long. */
+  recoverStaleClaims(timeoutMs: number = 3600000): number {
+    let recovered = 0;
+    const now = new Date().getTime();
+    for (const row of this.rows) {
+      if (row.state === 'RESOLVING' || row.state === 'RESEARCHING') {
+        const updated = new Date(row.updated_at).getTime();
+        if (now - updated > timeoutMs) {
+          row.state = 'QUEUED';
+          row.updated_at = new Date().toISOString();
+          recovered++;
+        }
+      }
+    }
+    if (recovered > 0) this.flush();
+    return recovered;
   }
 }

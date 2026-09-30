@@ -8,6 +8,7 @@
  * Provenance is always preserved.
  */
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, Provenance, SourceEntry } from './Model';
+import { ProviderCostClass } from '../IntelligenceCase';
 
 export interface ProviderCapabilities {
   searchCompanies: boolean;
@@ -24,6 +25,8 @@ export abstract class CompanyDataProvider {
   abstract readonly name: string;
   /** Whether this provider is configured / enabled. */
   abstract readonly enabled: boolean;
+  /** Whether this provider is FREE or PAID. */
+  abstract readonly costClass: ProviderCostClass;
   /** What this provider can do. */
   abstract readonly capabilities: ProviderCapabilities;
 

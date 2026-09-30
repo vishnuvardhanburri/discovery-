@@ -368,11 +368,12 @@ async function main() {
       })
     });
     const { evidence, discovery_errors } = await provider.observePublicSurface('https://example.com');
-    assert(evidence.length > 0, 'real provider produced observations');
+    assert(evidence && evidence.length > 0, 'real provider produced observations');
     assert(onPageCalls > 0, 'onPage progress callback fired');
-    assert(evidence.every(e => e.evidence_origin === 'REAL_PUBLIC_OBSERVATION'), 'all observations are real public observations');
+    assert(evidence && evidence.every(e => e.evidence_origin === 'REAL_PUBLIC_OBSERVATION'), 'all observations are real public observations');
     // never followed the cross-origin evil.com link
-    assert(!evidence.some(e => e.public_url.includes('evil.com')), 'cross-origin link not followed by provider');
+    assert(!evidence || !evidence.some(e => e.public_url.includes('evil.com')), 'cross-origin link not followed by provider');
+
   });
 
   // 11. INTERACTIVE REPL — help / status / dispatch

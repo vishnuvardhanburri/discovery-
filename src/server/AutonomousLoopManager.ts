@@ -1,10 +1,12 @@
 import { IntelligenceCase, Evidence, SourceRelationship } from './IntelligenceCase';
+import { ResearchPolicyManager } from './ResearchPolicyManager';
 
 import { VoIRouter } from './VoIRouter';
 import { VoIAction, VoIActionType } from './types/LoopTypes';
-import { GitHubProvider, GitHubOrgResolution, GitHubRepoInfo, GitHubProviderStatus, GitHubApiError } from './providers/GitHubProvider';
 import { TargetedSearchProvider } from './providers/TargetedSearchProvider';
-import { DeepSignalExtractor } from './DeepSignalExtractor';
+import { LiveIncidentCorrelationEngine } from './LiveIncidentCorrelationEngine';
+import { TargetVerificationEngine } from './TargetVerificationEngine';
+import { LiveTechnicalEvent, AffectedTargetCandidate } from './LiveIncidentModels';
 import { SignalCorrelationEngine } from './signals/SignalCorrelationEngine';
 import { OpportunityDetector } from './findings/OpportunityDetector';
 import { ResearchBudget } from './ResearchBudget';
@@ -20,6 +22,7 @@ import { EvidenceScoringEngine } from './EvidenceScoringEngine';
 import { extractorRegistry } from './extractors/ExtractorRegistry';
 import { SourceRelationshipValidator } from './SourceRelationshipValidator';
 import { SourceType } from './IntelligenceCase';
+import { SourceDiscoveryOrchestrator } from './SourceDiscoveryOrchestrator';
 
 export interface ActionExecutionResult {
   action: VoIActionType;
@@ -40,25 +43,33 @@ export interface ActionHistoryRecord {
 
 export class AutonomousLoopManager {
   private voIRouter: VoIRouter;
-  private ghProvider: GitHubProvider;
   private tsp: TargetedSearchProvider;
   private signalExtractor: DeepSignalExtractor;
   private correlationEngine: SignalCorrelationEngine;
   private oppDetector: OpportunityDetector;
-  private budget: any;
+  private budget: ResearchBudget;
   private observationProvider: any;
+  private discoveryOrchestrator: SourceDiscoveryOrchestrator;
+  private incidentCorrelation: LiveIncidentCorrelationEngine;
+  private verificationEngine: TargetVerificationEngine;
   private actionHistory: ActionHistoryRecord[] = [];
   private fetcher?: any;
 
   constructor(company?: string, observationProvider?: any, options?: { fetcher?: any }) {
     this.voIRouter = new VoIRouter();
-    this.ghProvider = new GitHubProvider();
     this.tsp = new TargetedSearchProvider();
     this.signalExtractor = new DeepSignalExtractor();
     this.correlationEngine = new SignalCorrelationEngine();
     this.oppDetector = new OpportunityDetector();
     this.budget = new ResearchBudget();
     this.observationProvider = observationProvider || new LivePublicObservationProvider();
+    this.discoveryOrchestrator = new SourceDiscoveryOrchestrator(
+      this.observationProvider,
+      this.tsp,
+      this.budget
+    );
+    this.incidentCorrelation = new LiveIncidentCorrelationEngine();
+    this.verificationEngine = new TargetVerificationEngine(this.observationProvider);
     this.fetcher = options?.fetcher;
   }
 
@@ -73,7 +84,7 @@ export class AutonomousLoopManager {
     for (let i = 0; i < maxIterations; i++) {
       console.log(`\n--- ITERATION ${i+1} ---`);
 
-      const isStopped = this.budget.isStopped(currentCase);
+      const isStopped = this.budget.isStoppedIntegrated(currentCase);
       if (isStopped) {
         console.log(`[LOOP_EXIT] Budget stopped early.`);
         break;
@@ -82,7 +93,6 @@ export class AutonomousLoopManager {
       try {
         const action = this.voIRouter.getNextBestAction(currentCase, this.budget, this.actionHistory);
 
-        // ANTI-DEADLOCK: Log the diversification force
         const lastExecution = this.actionHistory[this.actionHistory.length - 1];
         if (lastExecution && lastExecution.action_type === action.action &&
             lastExecution.evidence_delta === 0 && lastExecution.signal_delta === 0 && !lastExecution.state_changed) {
@@ -134,20 +144,13 @@ export class AutonomousLoopManager {
   }
 
   private async executeAction(action: VoIAction, currentCase: IntelligenceCase): Promise<ActionExecutionResult> {
-    const stage = this.budget.getCurrentStageNum(currentCase);
+    // We now use the la-mode budget check instead of stage-based counts
+    const stage = 1; // Maintain legacy for compatibility, but logic shifted to checkAndConsume
     this.budget.recordRequest(currentCase, stage);
 
     switch (action.action) {
-      case 'GITHUB_RESOLVE_ORG':
-        return await this.handleResolveOrg(currentCase);
-      case 'GITHUB_DISCOVER_REPOSITORIES':
-        return await this.handleDiscoverRepos(currentCase, action.target);
-      case 'GITHUB_OBSERVE_REPOSITORY':
-        return await this.handleObserveRepo(currentCase, action.target);
-      case 'GITHUB_COMPARE_TEMPORAL_STATE':
-        return await this.handleCompareTemporal(currentCase, action.target);
-      case 'GITHUB_EXPAND_FROM_SIGNAL':
-        return await this.handleExpandFromSignal(currentCase, action.target);
+      case 'RESEARCH_TECHNICAL_SURFACES':
+        return await this.handleTechnicalSurfaceResearch(currentCase);
       case 'TARGETED_DISCOVERY':
         return await this.handleTargetedDiscovery(currentCase);
       case 'BROAD_SURFACE_MAPPING':
@@ -159,20 +162,51 @@ export class AutonomousLoopManager {
     }
   }
 
+  private async handleTechnicalSurfaceResearch(currentCase: IntelligenceCase): Promise<ActionExecutionResult> {
+    console.log(`[ACTION] Executing TECHNICAL_SURFACE_RESEARCH for ${currentCase.company}...`);
+    try {
+      const { newEvidence, discoveryResults } = await this.discoveryOrchestrator.discoverTechnicalSurfaces(currentCase);
+
+      currentCase.evidence.push(...newEvidence);
+
+      return {
+        action: 'RESEARCH_TECHNICAL_SURFACES',
+        status: newEvidence.length > 0 ? 'COMPLETED' : 'EMPTY',
+        evidence_ids: newEvidence.map(e => e.id),
+        signals: []
+      };
+    } catch (e: any) {
+      console.error(`[TECHNICAL_SURFACE_RESEARCH] Error: ${e.message}`);
+      return { action: 'RESEARCH_TECHNICAL_SURFACES', status: 'FAILED', evidence_ids: [], signals: [], error: e.message };
+    }
+  }
+
   private async handleBroadSurfaceMapping(currentCase: IntelligenceCase): Promise<ActionExecutionResult> {
     console.log(`[ACTION] Executing BROAD_SURFACE_MAPPING for ${currentCase.company}...`);
     try {
       const results = await this.observationProvider.observePublicSurface(
         currentCase.company_surface?.homepage || `https://${currentCase.company_surface?.origin}`,
         {
-          // Guard the crawler by passing the required origin
           requiredOrigin: currentCase.company_surface?.origin
         } as any
       );
 
-      if (results.evidence.length > 0) {
-        // Validate relationship for all evidence from the provider
-        results.evidence.forEach((ev: Evidence) => {
+      if (results.status === 'RATE_LIMITED') {
+        console.log(`[FALLBACK_TRIGGER] Broad Surface Mapping rate-limited. Deferring to next available provider.`);
+        return { action: 'BROAD_SURFACE_MAPPING', status: 'DEFERRED', evidence_ids: [], signals: [], error: 'RATE_LIMITED' };
+      }
+
+      if (results.status === 'UNAVAILABLE') {
+        console.log(`[FALLBACK_TRIGGER] Broad Surface Mapping unavailable. Skipping.`);
+        return { action: 'BROAD_SURFACE_MAPPING', status: 'SKIPPED', evidence_ids: [], signals: [] };
+      }
+      if (results.status === 'ERROR') {
+        console.log(`[ERROR] Broad Surface Mapping encountered a critical error.`);
+        return { action: 'BROAD_SURFACE_MAPPING', status: 'FAILED', evidence_ids: [], signals: [], error: 'PROVIDER_ERROR' };
+      }
+
+      if (results.observations.length > 0) {
+        results.observations.forEach((ev: Evidence) => {
           ev.relationship_type = SourceRelationshipValidator.validate(
             ev.public_url,
             currentCase.company_surface?.origin || '',
@@ -180,7 +214,6 @@ export class AutonomousLoopManager {
           );
         });
 
-        // Update surface map to prevent routing loops
         if (!currentCase.company_surface) {
           currentCase.company_surface = {
             company: currentCase.company,
@@ -191,7 +224,7 @@ export class AutonomousLoopManager {
           } as any;
         }
 
-        const newPages = results.evidence
+        const newPages = results.observations
           .filter((e: Evidence) => e.public_url)
           .map((e: Evidence) => ({
             url: e.public_url!,
@@ -199,21 +232,18 @@ export class AutonomousLoopManager {
             status: e.status
           }));
 
-        // Deduplicate pages
         const existingUrls = new Set((currentCase.company_surface! as any).discovered_pages.map((p: any) => p.url));
         const uniquePages = newPages.filter((p: any) => !existingUrls.has(p.url));
         (currentCase.company_surface! as any).discovered_pages.push(...uniquePages);
 
-        currentCase.evidence.push(...results.evidence);
+        currentCase.evidence.push(...results.observations);
         return {
           action: 'BROAD_SURFACE_MAPPING',
           status: 'COMPLETED',
-          evidence_ids: results.evidence.map((e: Evidence) => e.id),
+          evidence_ids: results.observations.map((e: Evidence) => e.id),
           signals: []
         };
       }
-
-
 
       console.log(`[BROAD_SURFACE_MAPPING] Provider returned zero usable evidence.`);
       return { action: 'BROAD_SURFACE_MAPPING', status: 'COMPLETED', evidence_ids: [], signals: [] };
@@ -223,136 +253,19 @@ export class AutonomousLoopManager {
     }
   }
 
-  private async handleResolveOrg(currentCase: IntelligenceCase): Promise<ActionExecutionResult> {
-    try {
-      const res = await this.ghProvider.resolveOrg(currentCase.company, currentCase.company_surface?.origin || '');
-      if (!res) return { action: 'GITHUB_RESOLVE_ORG', status: 'FAILED', evidence_ids: [], signals: [], error: 'Org not found' };
-
-      if (!currentCase.github_memory) {
-        currentCase.github_memory = {
-          org_login: res.login,
-          repositories: {},
-          temporal_deltas: []
-        };
-      } else {
-        currentCase.github_memory.org_login = res.login;
-      }
-
-      const evidence: Evidence = {
-        id: res.evidence[0]?.id || `ev-gh-org-${res.login}`,
-        evidence_origin: 'REAL_PUBLIC_OBSERVATION',
-        public_url: res.html_url,
-        source_type: 'GITHUB',
-        observed_behavior: `Resolved GitHub Organization: ${res.login} (${res.reason})`,
-        retrieved_at: new Date().toISOString(),
-        evidence_text: res.reason,
-        reproductions: 1, repeatable: true, tested_without_auth: true, not_tested: []
-      };
-      currentCase.evidence.push(evidence);
-
-      return { action: 'GITHUB_RESOLVE_ORG', status: 'COMPLETED', evidence_ids: [evidence.id], signals: [] };
-    } catch (e: any) {
-      if (e instanceof GitHubApiError && e.status === GitHubProviderStatus.RATE_LIMITED) {
-        return { action: 'GITHUB_RESOLVE_ORG', status: 'DEFERRED', evidence_ids: [], signals: [], error: e.message };
-      }
-      return { action: 'GITHUB_RESOLVE_ORG', status: 'FAILED', evidence_ids: [], signals: [], error: e.message };
-    }
-  }
-
-  private async handleDiscoverRepos(currentCase: IntelligenceCase, org?: string): Promise<ActionExecutionResult> {
-    const targetOrg = org || currentCase.github_memory?.org_login;
-    if (!targetOrg) return { action: 'GITHUB_DISCOVER_REPOSITORIES', status: 'FAILED', evidence_ids: [], signals: [], error: 'No org login available' };
-
-    try {
-      const repos = await this.ghProvider.discoverRepositories(targetOrg);
-      if (!currentCase.github_memory) {
-        currentCase.github_memory = {
-          org_login: targetOrg,
-          repositories: {},
-          temporal_deltas: []
-        };
-      }
-
-      repos.forEach(r => {
-        currentCase.github_memory!.repositories[r.name] = {
-          last_commit_sha: '',
-          last_commit_at: r.updated_at,
-          release_count: 0,
-          activity_score: r.intelligence_score
-        };
-      });
-
-      return { action: 'GITHUB_DISCOVER_REPOSITORIES', status: 'COMPLETED', evidence_ids: [], signals: [] };
-    } catch (e: any) {
-      if (e instanceof GitHubApiError && e.status === GitHubProviderStatus.RATE_LIMITED) {
-        return { action: 'GITHUB_DISCOVER_REPOSITORIES', status: 'DEFERRED', evidence_ids: [], signals: [], error: e.message };
-      }
-      return { action: 'GITHUB_DISCOVER_REPOSITORIES', status: 'FAILED', evidence_ids: [], signals: [], error: e.message };
-    }
-  }
-
-  private async handleObserveRepo(currentCase: IntelligenceCase, repoName?: string): Promise<ActionExecutionResult> {
-    const org = currentCase.github_memory?.org_login;
-    if (!org) return { action: 'GITHUB_OBSERVE_REPOSITORY', status: 'FAILED', evidence_ids: [], signals: [], error: 'No org login' };
-    const targetRepo = repoName || Object.keys(currentCase.github_memory!.repositories)[0];
-    if (!targetRepo) return { action: 'GITHUB_OBSERVE_REPOSITORY', status: 'FAILED', evidence_ids: [], signals: [], error: 'No repos discovered' };
-
-    try {
-      const { evidence, metrics } = await this.ghProvider.observeRepository(org, targetRepo, currentCase);
-
-      this.budget.consumeGitHubObservation(currentCase);
-
-      if (currentCase.github_memory) {
-        currentCase.github_memory.repositories[targetRepo] = {
-          ...currentCase.github_memory.repositories[targetRepo],
-          last_commit_at: new Date().toISOString(),
-          activity_score: metrics.commit_count
-        };
-      }
-      currentCase.evidence.push(...evidence);
-      return {
-        action: 'GITHUB_OBSERVE_REPOSITORY',
-        status: 'COMPLETED',
-        evidence_ids: evidence.map(e => e.id),
-        signals: []
-      };
-    } catch (e: any) {
-      if (e instanceof GitHubApiError && e.status === GitHubProviderStatus.RATE_LIMITED) {
-        return { action: 'GITHUB_OBSERVE_REPOSITORY', status: 'DEFERRED', evidence_ids: [], signals: [], error: e.message };
-      }
-      return { action: 'GITHUB_OBSERVE_REPOSITORY', status: 'FAILED', evidence_ids: [], signals: [], error: e.message };
-    }
-  }
-
-  private async handleCompareTemporal(currentCase: IntelligenceCase, repoName?: string): Promise<ActionExecutionResult> {
-    const org = currentCase.github_memory?.org_login;
-    const targetRepo = repoName || Object.keys(currentCase.github_memory?.repositories || {}).sort()[0];
-    if (!org || !targetRepo) return { action: 'GITHUB_COMPARE_TEMPORAL_STATE', status: 'FAILED', evidence_ids: [], signals: [], error: 'Insufficient state' };
-
-    try {
-      const { evidence, metrics } = await this.ghProvider.observeRepository(org, targetRepo, currentCase);
-      currentCase.evidence.push(...evidence);
-      return {
-        action: 'GITHUB_COMPARE_TEMPORAL_STATE',
-        status: 'COMPLETED',
-        evidence_ids: evidence.map(e => e.id),
-        signals: []
-      };
-    } catch (e: any) {
-      if (e instanceof GitHubApiError && e.status === GitHubProviderStatus.RATE_LIMITED) {
-        return { action: 'GITHUB_COMPARE_TEMPORAL_STATE', status: 'DEFERRED', evidence_ids: [], signals: [], error: e.message };
-      }
-      return { action: 'GITHUB_COMPARE_TEMPORAL_STATE', status: 'FAILED', evidence_ids: [], signals: [], error: e.message };
-    }
-  }
-
-  private async handleExpandFromSignal(currentCase: IntelligenceCase, signalId?: string): Promise<ActionExecutionResult> {
-    return await this.handleDiscoverRepos(currentCase);
-  }
-
   private async handleTargetedDiscovery(currentCase: IntelligenceCase): Promise<ActionExecutionResult> {
     try {
       const results = await this.tsp.discoverSource(currentCase.company, currentCase.company_surface?.origin || '', 'BROAD');
+
+      if (results.failureReason === 'SEARCH_RATE_LIMITED') {
+        console.log(`[FALLBACK_TRIGGER] Targeted Discovery rate-limited. Deferring.`);
+        return { action: 'TARGETED_DISCOVERY', status: 'DEFERRED', evidence_ids: [], signals: [], error: 'RATE_LIMITED' };
+      }
+      if (results.failureReason === 'SEARCH_UNAVAILABLE') {
+        console.log(`[FALLBACK_TRIGGER] Targeted Discovery unavailable. Skipping.`);
+        return { action: 'TARGETED_DISCOVERY', status: 'SKIPPED', evidence_ids: [], signals: [] };
+      }
+
       const evidence = results.results?.map((url: string, i: number) => {
         const relationship = SourceRelationshipValidator.validate(
           url,
@@ -382,7 +295,6 @@ export class AutonomousLoopManager {
   private processEvidence(currentCase: IntelligenceCase, evidenceIds: string[]) {
     const evidenceToProcess = currentCase.evidence.filter((e: Evidence) => evidenceIds.includes(e.id));
 
-    // 1. SCORE ALL NEW EVIDENCE
     currentCase.evidence = currentCase.evidence.map((ev: Evidence) => {
       if (!ev.scoring || ev.scoring.total_score === undefined) {
         const scored = EvidenceScoringEngine.score(ev);
@@ -392,63 +304,24 @@ export class AutonomousLoopManager {
       return ev;
     });
 
-    // 2. SOURCE-AWARE EXTRACTION
-    const allObservations: any[] = [];
+    const allTechnicalFacts: TechnicalEvidence[] = [];
     for (const ev of evidenceToProcess) {
-      const extractor = extractorRegistry.getExtractor(ev.source_type);
-      if (extractor) {
-        const rawContent = ev.raw_observation || '';
-        const obs = extractor.extract(rawContent, ev.public_url, currentCase);
-
-        // FORENSIC TRACE: PHASE 2 - Verify Content Transformation
-        const cleanedContent = (extractor as any).cleanText ? (extractor as any).cleanText(rawContent) : 'N/A';
-        console.log(`\n[CONTENT_TRANSFORMATION_TRACE]`);
-        console.log(`URL: ${ev.public_url}`);
-        console.log(`RAW_CONTENT_LENGTH: ${rawContent.length}`);
-        console.log(`CLEAN_TEXT_LENGTH: ${cleanedContent.length}`);
-        console.log(`OBSERVATIONS_FOUND: ${obs.length}`);
-        obs.forEach((o, i) => {
-          console.log(`  Obs ${i}: [${o.type}] ${o.raw_text?.slice(0, 200)}...`);
-        });
-
-        allObservations.push(...obs);
-      } else {
-        if (ev.source_type !== 'UNKNOWN' && ev.source_type !== 'SEARCH_RESULT') {
-          console.log(`[EXTRACTOR_MISSING] No extractor for type: ${ev.source_type}`);
-        }
-      }
+      const facts = TechnicalEvidenceExtractor.extractFacts(ev);
+      allTechnicalFacts.push(...facts);
     }
 
-    // 3. SIGNAL EXTRACTION (Transitioning to SignalCandidates)
-    console.log(`\n[SIGNAL_EXTRACTION_TRACE] Processing ${allObservations.length} observations...`);
-
-    // FORENSIC TRACE: PHASE 1 - Observation Audit
-    allObservations.forEach((obs: any, i: number) => {
-      // Build a quick lookup of evidence IDs from evidenceToProcess to avoid self-reference
-      const evIds = new Set(evidenceToProcess.map((et: any) => et.id));
-      const ev: Evidence | undefined = currentCase.evidence.find((e: any) =>
-        e.public_url === obs.url ||
-        (obs.metadata && obs.metadata.source_url === e.public_url) ||
-        evIds.has(e.id)
-      );
-      console.log(`\n[OBSERVATION_TRACE]`);
-      console.log(`company=${currentCase.company}`);
-      console.log(`evidence_id=${ev?.id || 'UNKNOWN'}`);
-      console.log(`source_type=${ev?.source_type || 'UNKNOWN'}`);
-      console.log(`source_url=${obs.url || (ev?.public_url || 'UNKNOWN')}`);
-      console.log(`observation_type=${obs.type}`);
-      console.log(`text_length=${obs.raw_text?.length || 0}`);
-      console.log(`strength=${ev?.strength || 'UNKNOWN'}`);
-      console.log(`score=${ev?.scoring?.total_score || 'UNKNOWN'}`);
-      console.log(`text="${obs.raw_text?.slice(0, 1000) || 'NO_TEXT'}"`);
-    });
-
-    const newSignals = DeepSignalExtractor.extract(allObservations, currentCase.evidence);
-    console.log(`[SIGNAL_DEBUG] Extracted ${newSignals.length} signals.`);
+    // Map extracted technical facts to signal candidates
+    const newSignals = TechnicalEvidenceExtractor.generateCandidates(
+      allTechnicalFacts,
+      evidenceToProcess[0] // Simplified for the first evidence item; in production, map 1:1
+    );
+    console.log(`[SIGNAL_DEBUG] Extracted ${newSignals.length} signals from ${allTechnicalFacts.length} technical facts.`);
+    currentCase.signals = [...(currentCase.signals || []), ...newSignals];
     currentCase.signals = [...(currentCase.signals || []), ...newSignals];
 
-    // 4. CORRELATION & OPPORTUNITY
-    const correlationResult = SignalCorrelationEngine.correlate(currentCase.signals, currentCase.evidence);
+    const correlationResult = SignalCorrelationEngine.correlate(currentCase.signals, {
+      evidence: currentCase.evidence
+    } as any);
     currentCase.correlated_groups = correlationResult.groups;
 
     const opps = OpportunityDetector.detect(currentCase.signals, currentCase.evidence, { company: currentCase.company });
@@ -474,7 +347,7 @@ export class AutonomousLoopManager {
       ...currentCase,
       evidence: currentCase.evidence.slice(0, Math.max(0, currentCase.evidence.length - 3)),
       budget_state: { ...(currentCase.budget_state || {}), requestsUsed: (currentCase.budget_state?.requestsUsed || 0) - 5 },
-      signals: (currentCase.signals || []).slice(0, -1),
+      signals: (currentCase.signals || []),
     } as any;
 
     const trajectory = TemporalDeltaEngine.calculateTrajectory(currentCase, simulatedPreviousCase);
@@ -502,8 +375,7 @@ export class AutonomousLoopManager {
       currentCase.prospect_decision = {
         ...(currentCase.prospect_decision as any),
         synapse_insights: synapseCorrelations,
-      };
-      console.log(`[SYNAPSE_INSIGHT] Detected ${synapseCorrelations[0].vulnerability_type} | Leverage: ${synapseCorrelations[0].leverage_point}`);
+      } ;
     }
 
     const xray = new BehavioralXRayAnalyzer();

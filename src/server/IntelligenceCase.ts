@@ -1,4 +1,5 @@
 import type { SearchResult } from './SearchCache';
+import { SignalType } from './SignalTaxonomy';
 
 export enum SearchFailureReason {
   SEARCH_BLOCKED = 'SEARCH_BLOCKED',
@@ -21,7 +22,8 @@ export type EvidenceOrigin =
   | 'GROWJO_SOURCE'
   | 'OFFICIAL_COMPANY_SOURCE'
   | 'PUBLIC_PROFESSIONAL_SOURCE';
-export type EvidenceLevel = 'CONFIRMED' | 'SUPPORTED' | 'HYPOTHESIS' | 'UNKNOWN';
+
+export type EvidenceLevel = 'L0_DISCOVERY' | 'L1_SIGNAL' | 'L2_ADVISORY' | 'L3_VERIFIED';
 export type FitStatus = 'FIT' | 'NOT_FIT';
 export type ProspectDecision = 'GO' | 'RESEARCH_MORE' | 'NO_GO';
 export type StrengthLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'NOT_APPLICABLE';
@@ -38,15 +40,26 @@ export type SignalSourceType =
   | 'PUBLIC_PROFESSIONAL'
   | 'OTHER';
 export type SeverityLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'UNKNOWN';
-export type SourceRelationship = 'VERIFIED_OWNED' | 'VERIFIED_EXTERNAL' | 'UNVERIFIED';
+export type SourceState =
+  | 'SUCCESS' | 'EMPTY' | 'RATE_LIMITED' | 'UNAVAILABLE'
+  | 'BLOCKED_BY_POLICY' | 'DEFERRED' | 'SKIPPED' | 'ERROR';
 
-export type DiscoveryState =
-  | 'START'
-  | 'DISCOVERY_SUCCESS'
-  | 'DISCOVERY_PARTIAL'
-  | 'DISCOVERY_BLOCKED'
-  | 'DISCOVERY_UNAVAILABLE'
-  | 'DISCOVERY_EXHAUSTED';
+export type EvidenceClassification =
+  | 'SURFACE'    // Infrastructure metadata (robots.txt, sitemaps)
+  | 'DOCUMENT'   // Static technical truth (blogs, docs, READMEs)
+  | 'DISCUSSION' // Community/Social truth (Issues, Forums, Reddit)
+  | 'OBSERVATION'; // Direct behavioral proof (HTTP response, latency)
+
+export interface Provenance {
+  source_url: string;
+  canonical_url: string;
+  source_type: SourceType;
+  discovery_mechanism: 'SEARCH' | 'SITEMAP' | 'ROBOTS' | 'HTML_LINK' | 'API_DISCOVERY' | 'GITHUB_WEB_DISCOVERY';
+  retrieval_timestamp: string;
+  provider: string;
+  attribution: string;
+  classification: EvidenceClassification;
+}
 
 export type EngineMode = 'AUTONOMOUS' | 'INTERACTIVE' | 'HYBRID' | 'PRODUCTION' | 'TEST';
 
@@ -83,7 +96,7 @@ export type EvidenceRelationship = 'SUPPORT' | 'CONTRADICT' | 'CORROBORATE' | 'N
 
 export interface SignalCandidate {
   id: string;
-  type: SignalSourceType;
+  type: SignalType;
   source_url: string;
   raw_match: string;
   initial_strength: SignalStrength;
@@ -93,7 +106,7 @@ export interface SignalCandidate {
 
 export interface SourceCoverage {
   source_type: SourceType;
-  status: 'NOT_ATTEMPTED' | 'SUCCESS' | 'EMPTY' | 'BLOCKED';
+  state: SourceState;
   evidence_count: number;
   strongest_signal: EvidenceStrength;
   last_observed_at?: string;
@@ -110,7 +123,7 @@ export type EvidenceType =
 export interface ScoreBreakdown {
   reliability: number;     // 0-100: Trust in the source
   directness: number;      // 0-100: How directly it proves a claim
-  specificity: number;     // 0-100: Technical detail vs generic prose
+  specificity: number;      // 0-100: Technical detail vs generic prose
   freshness: number;       // 0-100: Recency of the observation
   relevance: number;       // 0-100: Alignment with the target persona/pain
   repeatability: number;   // 0-100: Can it be reproduced?
@@ -119,36 +132,28 @@ export interface ScoreBreakdown {
 }
 
 export interface Evidence {
-  // Metadata
   id: string;
   company_id?: string;
+  provenance: Provenance;
   evidence_origin: EvidenceOrigin;
   type?: EvidenceType;
   public_url: string;
   source_type: SourceType;
   source_url?: string;
-  source_title?: string;
-  relationship_type?: SourceRelationship;
+  source_title?: string
+  relationship_type?: any;
   retrieved_at: string;
-
-  // Observation Data
-  raw_observation?: string;      // The original text/response
-  normalized_observation?: string; // Cleaned/parsed version for the operator
-
-  // Scoring & Strength
+  raw_observation?: string;
+  normalized_observation?: string;
   scoring?: ScoreBreakdown;
   strength?: EvidenceStrength;
-  confidence?: number;            // 0.0 - 1.0
-  observation_type?: string;      // e.g., 'SRE_hiring', 'incident', 'infra_scaling'
+  confidence?: number;
+  observation_type?: string;
   temporal_status?: TemporalStatus;
   relationship?: EvidenceRelationship;
-  scoring_reasons?: Record<string, string>; // Mapping dimensions to "WHY" reasons
-
-  // Relationship Mapping
+  scoring_reasons?: Record<string, string>;
   supports?: string[];
   contradicts?: string[];
-
-  // Existing Technical Fields (Preserved)
   method?: string;
   status?: number | null;
   observed_behavior: string;
@@ -163,11 +168,33 @@ export interface Evidence {
   latency_ms?: number;
   latency_samples?: number[];
   baseline_latency_ms?: number;
+  evidenceLevel?: EvidenceLevel;
 }
 
-export interface ObservationOptions {
-  timeoutMs?: number;
-  headers?: Record<string, string>;
+export type ResearchMode = 'FREE_ONLY' | 'NORMAL' | 'PAID_AGGRESSIVE';
+export type ProviderCostClass = 'FREE' | 'PAID';
+
+export interface ResearchPolicy {
+  mode: ResearchMode;
+  allowPaidProviders: boolean;
+  costBudget: number;
+  freeFallback: boolean;
+  paidFallback: boolean;
+}
+
+export type ProviderExecutionStatus =
+  | 'SUCCESS' | 'EMPTY' | 'RATE_LIMITED' | 'UNAVAILABLE'
+  | 'ERROR' | 'BLOCKED_BY_POLICY' | 'DEFERRED' | 'SKIPPED';
+
+export interface ProviderExecutionResult<T> {
+  status: ProviderExecutionStatus;
+  provider: string;
+  observations: T[];
+  metadata?: {
+    retryAfterMs?: number;
+    requestsAttempted?: number;
+    sourceCount?: number;
+  }
 }
 
 export interface ObservationResult {
@@ -271,6 +298,102 @@ export interface ResearchBudgetState {
   stopReason?: string;
 }
 
+export type InvestigationState =
+  | 'IDLE'
+  | 'DISCOVERING'
+  | 'TECHNICAL_CONTEXT_FOUND'
+  | 'COMPLEXITY_IDENTIFIED'
+  | 'HYPOTHESIS_GENERATED'
+  | 'VERIFICATION_REQUIRED'
+  | 'VERIFICATION_INCONCLUSIVE'
+  | 'VERIFIED_FINDING'
+  | 'DIAGNOSTIC_ELIGIBLE'
+  | 'OUTREACH_READY'
+  | 'NO_ACTIONABLE_SIGNAL'
+  | 'VERIFICATION_TARGET_UNAVAILABLE'
+  | 'ADVISORY_NOTICE'
+  | 'INVESTIGATION_CANDIDATE';
+
+export interface CompanyIntelligenceProfile {
+  identity: {
+    companyName: string;
+    domain: string;
+    whatTheyDo: string;
+    industry?: string;
+  };
+  product: {
+    services: string[];
+    technicalProduct: string;
+    customerUseCases: string[];
+  };
+  technologyFootprint: {
+    languages: string[];
+    platforms: string[];
+    infrastructureClues: string[];
+  };
+  surfaces: {
+    apiDeveloper: string[];
+    architectureEngineering: string[];
+    statusReliability: string[];
+    releasesChangelog: string[];
+  };
+  engineeringContext: {
+    hiringSignals: string[];
+    articles: string[];
+    publicRepositories: string[];
+  };
+  operationalSignals: {
+    incidentHistory: string[];
+    infrastructureSignals: string[];
+    liveObservations: string[];
+  };
+  unknowns: string[];
+  researchGaps: string[];
+}
+
+export interface ComplexityNode {
+  id: string;
+  type: 'SERVICE' | 'DATABASE' | 'EXTERNAL_API' | 'USER_INTERFACE' | 'INFRA_COMPONENT';
+  label: string;
+  complexityScore: number;
+  evidenceIds: string[];
+  rationale: string;
+  entityIds?: string[];
+  sourceUrls?: string[];
+  supportingEvidenceIds?: string[];
+  contradictingEvidenceIds?: string[];
+  uncertainty?: string;
+  confidence?: 'LOW' | 'MEDIUM' | 'HIGH';
+}
+
+export interface ComplexityEdge {
+  from: string;
+  to: string;
+  relationship: 'DEPENDS_ON' | 'CALLS' | 'WRITES_TO' | 'ORCHESTRATES';
+  criticality: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+export interface ComplexityMap {
+  nodes: ComplexityNode[];
+  edges: ComplexityEdge[];
+  bottlenecks: string[];
+}
+
+export interface InvestigationHypothesis {
+  id: string;
+  technicalArea: string;
+  claim: string;
+  rationale: string;
+  evidenceIds: string[];
+  supportingSources: string[];
+  contradictingSources: string[];
+  unknowns: string[];
+  verificationTarget: string;
+  requiredVerification: string;
+  confidence: number;
+  status: 'HYPOTHESIS' | 'VERIFIED' | 'REFUTED' | 'INCONCLUSIVE';
+}
+
 export interface IntelligenceCase {
   company: string;
   fit_status: FitStatus;
@@ -306,6 +429,7 @@ export interface IntelligenceCase {
   confidence?: {
     evidence_confidence: StrengthLevel;
     technical_confidence: StrengthLevel;
+    same_surface_confidence: StrengthLevel;
     outreach_confidence: StrengthLevel;
   };
   risk_level?: 'LOW' | 'MEDIUM' | 'HIGH';
@@ -313,19 +437,13 @@ export interface IntelligenceCase {
   human_approval_status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'NOT_REQUIRED';
   human_review_audit?: any[];
   
-  // GITHUB MEMORY EXTENSION
-  github_memory?: {
-    org_login?: string;
-    last_observation_at?: string;
-    repositories: Record<string, {
-      last_commit_sha: string;
-      last_commit_at: string;
-      release_count: number;
-      activity_score: number;
-    }>;
-    temporal_deltas: any[];
-  };
+  intelligenceProfile?: CompanyIntelligenceProfile;
+  complexityMap?: ComplexityMap;
+  hypotheses?: InvestigationHypothesis[];
+  internalState?: InvestigationState;
 }
+
+export type DiscoveryState = 'IDLE' | 'DISCOVERING' | 'FOUND_CANDIDATE' | 'NOT_FOUND';
 
 export const CANDIDATE_ROLES = [
   'CTO', 'CPO', 'CEO',
@@ -339,7 +457,7 @@ export const CANDIDATE_ROLES = [
   'Technical Founder', 'Founder', 'Co-Founder', 'Co-founder'
 ] as const;
 
-export type CandidateRole = (typeof CANDIDATE_ROLES)[number] | string;
+export type CandidateRole = (typeof CANDIDATE_ROLES)[number] | 'string';
 
 export interface OwnerCandidate {
   name: string;
@@ -363,25 +481,32 @@ export interface DiscoveredPage {
 export type ProfessionalPageCategory =
   | 'homepage'
   | 'team_people'
-  | 'engineering'
-  | 'blog'
-  | 'docs'
-  | 'security'
-  | 'status_ops'
-  | 'about'
-  | 'hiring'
-  | 'other';
+  | 'Engineering' | 'blog' | 'docs' | 'security' | 'status_ops' | 'about' | 'hiring' | 'other';
 
 export interface CompanySurface {
   company: string;
   origin: string;
-  homepage: string;
+  company_homepage: string;
   discovered_pages: DiscoveredPage[];
   page_categories: Record<string, string[]>;
 }
 
 export interface OperatorProgress {
-  stage: 'company' | 'pages' | 'engineering' | 'people' | 'findings' | 'owner' | 'evidence' | 'email';
+  stage: 'company' | 'pages' | 'engineering' | 'findings' | 'owner' | 'evidence' | 'email';
   message: string;
   detail?: string;
+}
+
+export interface ProspectCandidate {
+  organization: string;
+  domain: string;
+  industry?: string;
+  publicFootprint: string[];
+  signals: SignalType[];
+  evidence: Evidence[];
+  hypotheses: InvestigationHypothesis[];
+  verificationTargets: any[];
+  verificationState: InvestigationState;
+  diagnosticFit: string;
+  provenance: string[];
 }
