@@ -45,6 +45,7 @@ import { DataSufficiencyChecker } from './DataSufficiencyChecker';
 import { LiveWebResearchProvider } from './LiveWebResearchProvider';
 import { ChangeDetector, snapshotFromProspect } from './ChangeDetector';
 import { FreshnessEngine } from './FreshnessEngine';
+import { AdaptiveInvestigationEngine, type AdaptiveInvestigationOptions, type AdaptiveInvestigationRecord, type AdaptiveInvestigationAggregate, type AdaptiveInvestigationResult } from './AdaptiveInvestigationEngine';
 
 /**
  * Language cues that an observation is *exposed without authentication*.
@@ -180,6 +181,8 @@ export class DeepProspectBuilder {
   private readonly searchProvider?: any;
   private readonly statePersistence?: any;
   private readonly skipLiveWebResearch?: boolean;
+  private readonly enableAdaptiveInvestigation: boolean;
+  private readonly adaptiveInvestigationOptions?: AdaptiveInvestigationOptions;
 
   constructor(options: DeepBuilderOptions = {}) {
     this.fetcher = options.fetcher;
@@ -198,6 +201,8 @@ export class DeepProspectBuilder {
     this.searchProvider = options.searchProvider;
     this.statePersistence = options.statePersistence;
     this.skipLiveWebResearch = options.skipLiveWebResearch ?? false;
+    this.enableAdaptiveInvestigation = options.enableAdaptiveInvestigation ?? false;
+    this.adaptiveInvestigationOptions = options.adaptiveInvestigationOptions;
   }
 
   async build(targetUrl: string): Promise<DeepBuilderResult> {
@@ -756,6 +761,34 @@ export class DeepProspectBuilder {
       finding: deepFinding ?? (caseRef.finding_classification || null),
     });
 
+    // Adaptive Investigation Engine — runs after the standard pipeline.
+    // Examines boundary observations and, when triggered, attempts pivots
+    // to alternate public surfaces. Telemetry is attached to the prospect.
+    let adaptiveResult = null;
+    if (this.enableAdaptiveInvestigation) {
+      this.onProgress?.('deepening', 'Adaptive investigation: examining boundary observations.');
+      try {
+        const adaptiveEngine = new AdaptiveInvestigationEngine({
+          fetcher: this.fetcher,
+          ...this.adaptiveInvestigationOptions,
+          onProgress: (stage, msg) => this.onProgress?.(stage as any, msg),
+        });
+        const initialUrl = surface.homepage || surface.company_homepage || `https://${parsed.hostname}`;
+        adaptiveResult = await adaptiveEngine.investigate(
+          surface.company,
+          initialUrl,
+          caseRef.evidence,
+          provider instanceof LivePublicObservationProvider
+            ? (provider as any).getDiscoveredSubdomains()
+            : []
+        );
+        this.onProgress?.('deepening', `Adaptive investigation complete: ${adaptiveResult.records.length} record(s), ${adaptiveResult.aggregate.pivots_executed} pivot(s) executed.`);
+      } catch (e: any) {
+        this.onProgress?.('deepening', `Adaptive investigation error: ${e?.message || String(e)}`);
+        adaptiveResult = null;
+      }
+    }
+
     const prospect: DeepProspect = {
       company: surface.company,
       domain: parsed.hostname,
@@ -799,6 +832,7 @@ export class DeepProspectBuilder {
       search_queries: searchQueries,
       live_web_researched: liveWebResearched,
       changes: priorChanges,
+      adaptive_investigation: adaptiveResult ?? { attempted: false, records: [], aggregate: { boundary_observations: 0, pivots_suggested: 0, pivots_executed: 0, alternate_surfaces_found: 0, new_evidence_found: 0, new_verification_targets: 0, verified_from_adaptive_path: 0, no_useful_result: 0 } },
       artifact_path: '',
       audit_trail: auditTrail,
       case_ref: caseRef

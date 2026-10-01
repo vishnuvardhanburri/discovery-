@@ -84,6 +84,8 @@
     "src/server/freshness/ChangeDetector.ts",
     "src/server/system/XaviraSystemManager.ts",
     "tests/researchController.test.ts",
-    "tests/findingEvaluator.test.ts"
+    "tests/findingEvaluator.test.ts",
+    "tests/adaptiveInvestigation.test.ts",
+    "src/server/AdaptiveInvestigationEngine.ts"
   ]
 }

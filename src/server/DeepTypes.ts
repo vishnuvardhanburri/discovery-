@@ -412,6 +412,14 @@ export interface DeepProspect {
   live_web_researched?: boolean;
   /** Change-detection diff (new/changed/unchanged) vs. previously stored state. */
   changes?: ChangeRecord[];
+  /** Adaptive investigation telemetry — structured records of pivot attempts
+   * and boundary-aware discovery. Present on all prospects; `attempted` is
+   * false when no adaptive investigation occurred. */
+  adaptive_investigation?: {
+    attempted: boolean;
+    records: import('./AdaptiveInvestigationEngine').AdaptiveInvestigationRecord[];
+    aggregate: import('./AdaptiveInvestigationEngine').AdaptiveInvestigationAggregate;
+  };
 }
 
 // ── Builder I/O ─�────────────────────────────────────────────────────────────
@@ -452,6 +460,12 @@ export interface DeepBuilderOptions {
   statePersistence?: any;
   /** Skip live-web research entirely (use dataset/surface only). */
   skipLiveWebResearch?: boolean;
+  /** Enable adaptive investigation layer (default: false). When enabled,
+   * the builder runs an AdaptiveInvestigationEngine after the standard
+   * pipeline and attaches structured telemetry to the prospect. */
+  enableAdaptiveInvestigation?: boolean;
+  /** Options for the adaptive investigation engine. */
+  adaptiveInvestigationOptions?: import('./AdaptiveInvestigationEngine').AdaptiveInvestigationOptions;
 }
 
 /** Minimal interface the builder relies on from the live provider. */
