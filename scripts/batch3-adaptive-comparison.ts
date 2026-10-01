@@ -214,7 +214,7 @@ async function main() {
     total_evidence_records: 0, total_subdomains_discovered: 0,
     adaptive_pivots_suggested: 0, adaptive_pivots_executed: 0,
     adaptive_surfaces_found: 0, adaptive_new_evidence: 0,
-    adaptive_verified: 0, adaptive_no_useful: 0,
+    adaptive_new_verification_targets: 0, adaptive_verified: 0, adaptive_no_useful: 0,
     status: 'RUNNING' as string,
   };
   writeManifest(manifest);
@@ -270,7 +270,7 @@ async function main() {
     const decisions: Record<string, number> = {};
     let totalEvidence = 0, totalSubs = 0;
     const allSubs = new Set<string>();
-    let pivotsSuggested = 0, pivotsExecuted = 0, surfacesFound = 0, newEvidence = 0, verified = 0, noUseful = 0;
+    let pivotsSuggested = 0, pivotsExecuted = 0, surfacesFound = 0, newEvidence = 0, newTargets = 0, verified = 0, noUseful = 0;
     for (const a of allArtifacts) {
       const d = a.decision || 'NONE';
       decisions[d] = (decisions[d] || 0) + 1;
@@ -281,6 +281,7 @@ async function main() {
       pivotsExecuted += ag.pivots_executed || 0;
       surfacesFound += ag.alternate_surfaces_found || 0;
       newEvidence += ag.new_evidence_found || 0;
+      newTargets += ag.new_verification_targets || 0;
       verified += ag.verified_from_adaptive_path || 0;
       noUseful += ag.no_useful_result || 0;
     }
@@ -291,6 +292,7 @@ async function main() {
     manifest.adaptive_pivots_executed = pivotsExecuted;
     manifest.adaptive_surfaces_found = surfacesFound;
     manifest.adaptive_new_evidence = newEvidence;
+    manifest.adaptive_new_verification_targets = newTargets;
     manifest.adaptive_verified = verified;
     manifest.adaptive_no_useful = noUseful;
     writeManifest(manifest);
