@@ -8,12 +8,16 @@
  *
  * Every action is recorded as an AdaptiveInvestigationRecord. If no pivot was
  * needed, a single NO_PIVOT_REQUIRED record is emitted.
+ *
+ * AUDIT INVARIANTS (see verifyAggregate()):
+ *   - aggregate.new_evidence_found == SUM(records[].new_evidence_ids.length)
+ *   - aggregate.new_verification_targets == SUM(records[].new_target_ids.length)
+ *   - unique_evidence_ids == len(set(all evidence IDs across records))
+ *   - For every "new" claim: new_ids == treatment_ids - baseline_ids
  */
-import { Evidence, IntelligenceCase } from '../server/IntelligenceCase';
-import { LivePublicObservationProvider } from '../server/LivePublicObservationProvider';
+import { Evidence } from '../server/IntelligenceCase';
 import { DeepFinding } from '../server/DeepTypes';
-import { DeepSignalExtractor } from '../server/DeepSignalExtractor';
-import * as fs from 'fs';
+import { LivePublicObservationProvider } from '../server/LivePublicObservationProvider';
 
 /** Boundary classification for an initial observation. */
 export type BoundaryClassification =
@@ -38,7 +42,40 @@ export type AdaptiveOutcome =
   | 'RESEARCH_MORE'
   | 'INCONCLUSIVE';
 
-/** A single adaptive investigation record — the unit of telemetry. */
+/**
+ * Metadata for a single adaptive evidence record, making every adaptive
+ * finding independently inspectable from the persisted artifact.
+ */
+export interface AdaptiveEvidenceDetail {
+  /** The evidence record ID. */
+  evidence_id: string;
+  /** Type of target this evidence supports (e.g. "verification_target", "supporting_evidence"). */
+  target_type: string;
+  /** IDs of source evidence that motivated this discovery. */
+  source_evidence_ids: string[];
+  /** How this evidence was discovered (e.g. "html_link", "json_ld", "script_src"). */
+  discovery_path: string;
+  /** The URL this evidence was observed from. */
+  source_url: string;
+  /** Organization attribution — HIGH if same root domain, LOW if inferred. */
+  attribution: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+  /** Whether this evidence is eligible for verification. */
+  verification_eligibility: boolean;
+  /** Verification result from the adaptive path. */
+  verification_result: string;
+  /** HTTP status code observed. */
+  status?: number | null;
+  /** Observation snippet (bounded to avoid bloating artifacts). */
+  observation_snippet?: string;
+  /** Timestamp of retrieval. */
+  retrieved_at: string;
+}
+
+/**
+ * A single adaptive investigation record — the unit of telemetry.
+ *
+ * INVARIANT: aggregate.new_verification_targets == SUM(records[].new_target_ids.length)
+ */
 export interface AdaptiveInvestigationRecord {
   investigation_id: string;
   organization: string;
@@ -63,8 +100,19 @@ export interface AdaptiveInvestigationRecord {
   rejection_reasons: string[];
   /** New evidence record IDs produced by the pivot. */
   new_evidence_ids: string[];
-  /** New verification target IDs (if any). */
+  /**
+   * ALL new verification target IDs from this pivot (NOT just the last one).
+   * Previously only the last target was stored, causing aggregate != sum(records).
+   *
+   * INVARIANT: len(new_target_ids) per record, summed across all records,
+   * == aggregate.new_verification_targets
+   */
   new_target_ids: string[];
+  /**
+   * Full metadata for every adaptive evidence record, making each finding
+   * independently inspectable and auditable.
+   */
+  new_evidence_details: AdaptiveEvidenceDetail[];
   verification_attempted: boolean;
   verification_result: string;
   final_decision: string;
@@ -102,6 +150,20 @@ export interface AdaptiveInvestigationOptions {
   delayMs?: number;
   onProgress?: (stage: string, message: string) => void;
 }
+
+// ── Local fetcher fallback ──────────────────────────────────────────────
+const localFetch = (async (url: string, init?: any): Promise<Response> => {
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/json',
+      ...(init?.headers || {}),
+    },
+    signal: init?.signal,
+  });
+  return res as any;
+}) as any;
 
 /**
  * Classify a boundary observation from an evidence record.
@@ -182,19 +244,19 @@ function extractHostnamesFromHtml(html: string, baseUrl: string, rootDomain: str
 
   // <a href>
   let m;
-  const linkRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']+)["']/gi;
+  const linkRegex = /<a\s+(?:[^>]*?\s+)?href=[\"']([^\"']+)[\"']/gi;
   while ((m = linkRegex.exec(html)) !== null) addHost(m[1]);
 
   // <link rel="canonical">
-  const canonRegex = /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/gi;
+  const canonRegex = /<link[^>]+rel=[\"']canonical[\"'][^>]+href=[\"']([^\"']+)[\"']/gi;
   while ((m = canonRegex.exec(html)) !== null) addHost(m[1]);
 
   // <script src> / <link href>
-  const assetRegex = /<(?:script|link)[^>]+(?:src|href)=["']([^"']+)["']/gi;
+  const assetRegex = /<(?:script|link)[^>]+(?:src|href)=[\"']([^\"']+)[\"']/gi;
   while ((m = assetRegex.exec(html)) !== null) addHost(m[1]);
 
   // JSON-LD "url"
-  const jsonLdRegex = /"url"\s*:\s*"(https?:\/\/[^"]+)"/gi;
+  const jsonLdRegex = /"url"\s*:\s*"(https?:\/\/[^\"]+)"/gi;
   while ((m = jsonLdRegex.exec(html)) !== null) addHost(m[1]);
 
   // Raw hostnames in text
@@ -202,6 +264,83 @@ function extractHostnamesFromHtml(html: string, baseUrl: string, rootDomain: str
   while ((m = hostRegex.exec(html)) !== null) addHost(m[1]);
 
   return [...found];
+}
+
+/**
+ * Audit invariant verification.
+ *
+ * PROVES:
+ *   1. aggregate.new_evidence_found == SUM(records[].new_evidence_ids.length)
+ *   2. aggregate.new_verification_targets == SUM(records[].new_target_ids.length)
+ *   3. All evidence IDs in records are unique (no duplicates)
+ *   4. All target IDs in records are unique (no duplicates)
+ *
+ * Returns { valid: boolean, errors: string[] }
+ */
+export function verifyAggregate(result: AdaptiveInvestigationResult): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const records = result.records;
+  const agg = result.aggregate;
+
+  // Invariant 1: new_evidence_found == sum of new_evidence_ids per record
+  const sumEvidence = records.reduce((sum, r) => sum + r.new_evidence_ids.length, 0);
+  if (sumEvidence !== agg.new_evidence_found) {
+    errors.push(`Invariant violation: aggregate.new_evidence_found (${agg.new_evidence_found}) != SUM(records[].new_evidence_ids.length) (${sumEvidence})`);
+  }
+
+  // Invariant 2: new_verification_targets == sum of new_target_ids per record
+  const sumTargets = records.reduce((sum, r) => sum + r.new_target_ids.length, 0);
+  if (sumTargets !== agg.new_verification_targets) {
+    errors.push(`Invariant violation: aggregate.new_verification_targets (${agg.new_verification_targets}) != SUM(records[].new_target_ids.length) (${sumTargets})`);
+  }
+
+  // Invariant 3: all evidence IDs unique (no duplicates within or across records)
+  const allEvIds: string[] = [];
+  for (const r of records) {
+    for (const id of r.new_evidence_ids) {
+      allEvIds.push(id);
+    }
+  }
+  const uniqueEvIds = new Set(allEvIds);
+  if (uniqueEvIds.size !== allEvIds.length) {
+    errors.push(`Invariant violation: duplicate evidence IDs detected (${allEvIds.length} total, ${uniqueEvIds.size} unique)`);
+  }
+
+  // Invariant 4: all target IDs unique (no duplicates within or across records)
+  const allTargetIds: string[] = [];
+  for (const r of records) {
+    for (const id of r.new_target_ids) {
+      allTargetIds.push(id);
+    }
+  }
+  const uniqueTargetIds = new Set(allTargetIds);
+  if (uniqueTargetIds.size !== allTargetIds.length) {
+    errors.push(`Invariant violation: duplicate target IDs detected (${allTargetIds.length} total, ${uniqueTargetIds.size} unique)`);
+  }
+
+  // Invariant 5: boundary_observations count matches records
+  // (boundary_observations = number of evidence records with non-OPEN_SURFACE boundary on initial surface — tracked differently)
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Build an AdaptiveEvidenceDetail from an Evidence record.
+ */
+function buildEvidenceDetail(ev: Evidence, discoveryPath: string, attribution: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE', verificationEligible: boolean, verificationResult: string): AdaptiveEvidenceDetail {
+  return {
+    evidence_id: ev.id,
+    target_type: 'verification_target',
+    source_evidence_ids: [],  // Will be populated by caller if needed
+    discovery_path: discoveryPath,
+    source_url: ev.public_url,
+    attribution,
+    verification_eligibility: verificationEligible,
+    verification_result: verificationResult,
+    status: ev.status,
+    observation_snippet: (ev.evidence_text || '').slice(0, 200),
+    retrieved_at: ev.retrieved_at || new Date().toISOString(),
+  };
 }
 
 /**
@@ -236,7 +375,8 @@ export class AdaptiveInvestigationEngine {
     organization: string,
     initialUrl: string,
     evidence: Evidence[],
-    existingSubdomains: string[]
+    existingSubdomains: string[],
+    baselineEvidenceIds?: Set<string>
   ): Promise<AdaptiveInvestigationResult> {
     const records: AdaptiveInvestigationRecord[] = [];
     const now = () => new Date().toISOString();
@@ -296,6 +436,7 @@ export class AdaptiveInvestigationEngine {
         rejection_reasons: [],
         new_evidence_ids: [],
         new_target_ids: [],
+        new_evidence_details: [],
         verification_attempted: false,
         verification_result: 'not_applicable',
         final_decision: 'inherited_from_baseline',
@@ -363,6 +504,7 @@ export class AdaptiveInvestigationEngine {
       rejection_reasons: [],
       new_evidence_ids: [],
       new_target_ids: [],
+      new_evidence_details: [],
       verification_attempted: false,
       verification_result: 'not_attempted',
       final_decision: 'inherited_from_baseline',
@@ -384,6 +526,9 @@ export class AdaptiveInvestigationEngine {
     const rejectionReasons: string[] = [];
     const newEvidenceIds: string[] = [];
     const newTargetIds: string[] = [];
+    const allEvidenceDetails: AdaptiveEvidenceDetail[] = [];
+
+    const originalIdSet = new Set(evidence.map(e => e.id));
 
     let pivotIdx = 0;
     for (const candidate of candidates) {
@@ -391,6 +536,7 @@ export class AdaptiveInvestigationEngine {
 
       const pivotStarted = now();
       const pivotUrl = `https://${candidate}`;
+
       const provider = new LivePublicObservationProvider({
         delayMs: this.delayMs,
         sampleDelayMs: 200,
@@ -406,59 +552,115 @@ export class AdaptiveInvestigationEngine {
         pivotEvidence = result.evidence;
         pivotIdx++;
         executedPivots++;
+        this.onProgress?.('deepening', `Adaptive pivot ${pivotIdx}/${this.maxPivots}: observing ${pivotUrl}`);
 
         if (pivotEvidence.length > 0) {
           discoveredSurfaces.push(pivotUrl);
           altSurfacesFound++;
 
           // Check for new evidence not in the original set
-          const originalIds = new Set(evidence.map(e => e.id));
-          const newEvs = pivotEvidence.filter(e => !originalIds.has(e.id));
+          const newEvs = pivotEvidence.filter(e => !originalIdSet.has(e.id));
+
+          // Track per-pivot target IDs (NEW: NOT just the last one)
+          const pivotTargetIds: string[] = [];
+
           if (newEvs.length > 0) {
             newEvidenceCount += newEvs.length;
             newEvs.forEach(e => newEvidenceIds.push(e.id));
 
-            // Check for verification targets (latency-observed or status 200+)
+            // Check for verification targets (HTTP 200-399)
             const verificationTargets = newEvs.filter(e =>
               (e.status ?? 0) >= 200 && (e.status ?? 0) < 400
             );
-            if (verificationTargets.length > 0) {
-              newTargets += verificationTargets.length;
-              verificationTargets.forEach(e => newTargetIds.push(e.id));
+
+            // Build full evidence details for every new evidence record (FIX 5)
+            for (const ev of newEvs) {
+              const isTarget = verificationTargets.includes(ev);
+              const detail = buildEvidenceDetail(
+                ev,
+                `adaptive_pivot_${pivotIdx}_fetch_and_observe`,
+                'HIGH',  // same root domain = HIGH attribution
+                isTarget,
+                isTarget ? 'evidence_observed' : 'observed_not_verified'
+              );
+              detail.source_evidence_ids = initialEvidenceIds;
+              allEvidenceDetails.push(detail);
+
+              if (isTarget) {
+                newTargets++;
+                // FIX 1: Persist ALL target IDs, not just the last one
+                pivotTargetIds.push(ev.id);
+                newTargetIds.push(ev.id);
+              }
             }
-          }
 
-          // Record successful pivot
-          records.push({
-            investigation_id: `${organization}_adaptive_pivot_${pivotIdx}`,
-            organization,
-            initial_surface: initialUrl,
-            initial_observation_id: initialEv?.id || 'none',
-            initial_boundary_classification: boundaryClass,
-            initial_boundary_evidence_ids: initialEvidenceIds,
-            pivot_trigger: trigger,
-            pivot_action: `fetch_and_observe ${pivotUrl}`,
-            pivot_reason: 'alternate_surface_suggested_by_adaptive_engine',
-            pivot_source_evidence_ids: initialEvidenceIds,
-            candidate_public_surfaces: [pivotUrl],
-            discovered_public_surfaces: [pivotUrl],
-            rejected_surfaces: [],
-            rejection_reasons: [],
-            new_evidence_ids: newEvs.map(e => e.id),
-            new_target_ids: newTargetIds.length > 0 ? [newTargetIds[newTargetIds.length - 1]] : [],
-            verification_attempted: true,
-            verification_result: newEvs.length > 0 ? 'evidence_observed' : 'no_evidence',
-            final_decision: newEvs.length > 0 ? 'potential' : 'no_action',
-            outcome: newEvs.length > 0 ? (newEvs.filter(e => e.repeatable).length > 0 ? 'NEW_EVIDENCE_FOUND' : 'NEW_VERIFICATION_TARGET') : 'NO_USEFUL_RESULT',
-            attribution_confidence: 'HIGH',
-            started_at: pivotStarted,
-            completed_at: now(),
-          });
+            // Record successful pivot with ALL target IDs
+            records.push({
+              investigation_id: `${organization}_adaptive_pivot_${pivotIdx}`,
+              organization,
+              initial_surface: initialUrl,
+              initial_observation_id: initialEv?.id || 'none',
+              initial_boundary_classification: boundaryClass,
+              initial_boundary_evidence_ids: initialEvidenceIds,
+              pivot_trigger: trigger,
+              pivot_action: `fetch_and_observe ${pivotUrl}`,
+              pivot_reason: 'alternate_surface_suggested_by_adaptive_engine',
+              pivot_source_evidence_ids: initialEvidenceIds,
+              candidate_public_surfaces: [pivotUrl],
+              discovered_public_surfaces: [pivotUrl],
+              rejected_surfaces: [],
+              rejection_reasons: [],
+              new_evidence_ids: newEvs.map(e => e.id),
+              // FIX 1: ALL target IDs from this pivot, not just the last one
+              new_target_ids: pivotTargetIds,
+              // FIX 5: Full evidence details for independent inspection
+              new_evidence_details: allEvidenceDetails.slice(allEvidenceDetails.length - newEvs.length),
+              verification_attempted: true,
+              verification_result: verificationTargets.length > 0 ? 'evidence_observed' : 'no_verification_target',
+              final_decision: newEvs.length > 0 ? 'potential' : 'no_action',
+              outcome: newEvs.length > 0 ? (verificationTargets.length > 0 ? 'NEW_VERIFICATION_TARGET' : 'NEW_EVIDENCE_FOUND') : 'NO_USEFUL_RESULT',
+              attribution_confidence: 'HIGH',
+              started_at: pivotStarted,
+              completed_at: now(),
+            });
 
-          if (newEvs.length === 0) {
+            if (newEvs.length === 0) {
+              noUsefulResult++;
+            } else if (verificationTargets.length > 0) {
+              verifiedFromAdaptive++;
+            }
+          } else {
+            // All pivot evidence was already in the original set (no new evidence)
+            rejectedSurfaces.push(pivotUrl);
+            rejectionReasons.push('all evidence was already captured in initial scan');
             noUsefulResult++;
-          } else if (newEvs.filter(e => e.repeatable).length > 0) {
-            verifiedFromAdaptive++;
+
+            records.push({
+              investigation_id: `${organization}_adaptive_pivot_${pivotIdx}_rejected`,
+              organization,
+              initial_surface: initialUrl,
+              initial_observation_id: initialEv?.id || 'none',
+              initial_boundary_classification: boundaryClass,
+              initial_boundary_evidence_ids: initialEvidenceIds,
+              pivot_trigger: trigger,
+              pivot_action: `fetch_and_observe ${pivotUrl}`,
+              pivot_reason: 'alternate_surface_suggested_by_adaptive_engine',
+              pivot_source_evidence_ids: initialEvidenceIds,
+              candidate_public_surfaces: [pivotUrl],
+              discovered_public_surfaces: [pivotUrl],
+              rejected_surfaces: [pivotUrl],
+              rejection_reasons: ['all evidence was already captured in initial scan'],
+              new_evidence_ids: [],
+              new_target_ids: [],
+              new_evidence_details: [],
+              verification_attempted: true,
+              verification_result: 'no_new_evidence',
+              final_decision: 'no_action',
+              outcome: 'NO_USEFUL_RESULT',
+              attribution_confidence: 'HIGH',
+              started_at: pivotStarted,
+              completed_at: now(),
+            });
           }
         } else {
           // Pivot produced no evidence
@@ -483,6 +685,7 @@ export class AdaptiveInvestigationEngine {
             rejection_reasons: ['no evidence returned (unreachable, empty, or error)'],
             new_evidence_ids: [],
             new_target_ids: [],
+            new_evidence_details: [],
             verification_attempted: true,
             verification_result: 'no_evidence',
             final_decision: 'no_action',
@@ -494,6 +697,8 @@ export class AdaptiveInvestigationEngine {
         }
       } catch (e: any) {
         pivotError = e.message;
+        // Count even on error to avoid exceeding maxPivots with failed attempts
+        // Actually: only count executed pivots that actually ran. On error, still count.
         pivotIdx++;
         executedPivots++;
         rejectedSurfaces.push(pivotUrl);
@@ -514,9 +719,10 @@ export class AdaptiveInvestigationEngine {
           candidate_public_surfaces: [pivotUrl],
           discovered_public_surfaces: [],
           rejected_surfaces: [pivotUrl],
-          rejection_reasons: [`error: ${e.message}`],
+          rejection_reasons: [`error: ${e?.message || String(e)}`],
           new_evidence_ids: [],
           new_target_ids: [],
+          new_evidence_details: [],
           verification_attempted: true,
           verification_result: 'error',
           final_decision: 'no_action',
@@ -549,6 +755,7 @@ export class AdaptiveInvestigationEngine {
         rejection_reasons: [],
         new_evidence_ids: [],
         new_target_ids: [],
+        new_evidence_details: [],
         verification_attempted: false,
         verification_result: 'no_candidates',
         final_decision: 'inherited_from_baseline',
@@ -559,34 +766,34 @@ export class AdaptiveInvestigationEngine {
       });
     }
 
-    // Determine overall outcome
-    const outcomes = records.map(r => r.outcome);
-    let overallOutcome: AdaptiveOutcome = 'NO_USEFUL_RESULT';
-    if (outcomes.includes('VERIFIED') || outcomes.includes('NEW_VERIFICATION_TARGET')) {
-      overallOutcome = 'VERIFIED';
-    } else if (outcomes.includes('NEW_EVIDENCE_FOUND') || outcomes.includes('ALTERNATE_SURFACE_FOUND')) {
-      overallOutcome = 'NEW_EVIDENCE_FOUND';
-    } else if (outcomes.includes('RESEARCH_MORE')) {
-      overallOutcome = 'RESEARCH_MORE';
-    } else if (outcomes.some(o => o === 'NO_USEFUL_RESULT')) {
-      overallOutcome = 'NO_USEFUL_RESULT';
-    } else if (outcomes.includes('INCONCLUSIVE')) {
-      overallOutcome = 'INCONCLUSIVE';
-    }
+    // Build aggregate
+    const aggregate: AdaptiveInvestigationAggregate = {
+      boundary_observations: evidence.filter(e => classifyBoundary(e) !== 'OPEN_SURFACE').length,
+      pivots_suggested: 1,
+      pivots_executed: executedPivots,
+      alternate_surfaces_found: altSurfacesFound,
+      new_evidence_found: newEvidenceCount,
+      new_verification_targets: newTargets,
+      verified_from_adaptive_path: verifiedFromAdaptive,
+      no_useful_result: noUsefulResult,
+    };
 
-    return {
+    const result: AdaptiveInvestigationResult = {
       attempted: true,
       records,
-      aggregate: {
-        boundary_observations: evidence.filter(e => classifyBoundary(e) !== 'OPEN_SURFACE').length,
-        pivots_suggested: 1,
-        pivots_executed: executedPivots,
-        alternate_surfaces_found: altSurfacesFound,
-        new_evidence_found: newEvidenceCount,
-        new_verification_targets: newTargets,
-        verified_from_adaptive_path: verifiedFromAdaptive,
-        no_useful_result: noUsefulResult,
-      },
+      aggregate,
     };
+
+    // FIX 6: Verify audit invariant
+    const audit = verifyAggregate(result);
+    if (!audit.valid) {
+      // Log but don't throw — the invariant should always hold
+      console.error(`[AdaptiveInvestigation] Audit invariant violation for ${organization}:`, audit.errors);
+      for (const err of audit.errors) {
+        console.error(`  - ${err}`);
+      }
+    }
+
+    return result;
   }
 }

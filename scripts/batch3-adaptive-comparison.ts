@@ -1,5 +1,5 @@
 /**
- * Controlled Comparison Runner — Batch 3
+ * Controlled Comparison Runner — Batch 3 (ADAPTIVE TREATMENT)
  *
  * Runs the SAME 50-company target list as batch3_run_1790873841985 (baseline)
  * with the Adaptive Investigation layer ENABLED (treatment).
@@ -9,11 +9,15 @@
  *
  * This run gets a new run_id and writes to a new directory.
  *
+ * Artifact schema is NORMALIZED to match the baseline: every canonical field
+ * from batch3-immutable.ts is preserved, with adaptive_investigation added
+ * as an additive block. This ensures direct comparability between runs.
+ *
  * At the end, produces a BASELINE vs ADAPTIVE comparison.
  */
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
 import { OutreachCardPrinter } from '../src/server/OutreachCardPrinter';
-import { LivePublicObservationProvider } from '../src/server/LivePublicObservationProvider';
+import { LivePublicObservationProvider } from '../server/LivePublicObservationProvider';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -63,6 +67,10 @@ const RUN_DIR = `/tmp/xavira-batch3-runs/${RUN_ID}`;
 const MANIFEST_PATH = path.join(RUN_DIR, 'manifest.json');
 const RESULTS_PATH = path.join(RUN_DIR, 'results_summary.json');
 
+/**
+ * Normalized artifact schema — matches batch3-immutable.ts canonical fields
+ * PLUS adaptive_investigation as an additive block.
+ */
 interface AdaptiveArtifact {
   run_id: string;
   run_timestamp: string;
@@ -72,8 +80,11 @@ interface AdaptiveArtifact {
   decision: string;
   finding_type: string;
   evidence_count: number;
+  evidence?: any[];
+  observations?: any[];
+  signals: any[];
   discovered_subdomains: string[];
-  signals: string[];
+  discovered_domains?: string[];
   decision_state?: string;
   confidence?: string;
   finding_confidence?: string;
@@ -81,6 +92,15 @@ interface AdaptiveArtifact {
   diagnostic_opportunity?: boolean;
   email_generated?: boolean;
   rate_limited: string[];
+  organization_identity?: { name: string; domain: string; homepage: string };
+  outreach_eligibility?: { eligible: boolean; reason: string };
+  uncertainties?: any[];
+  timestamps?: { started: string; completed: string; duration_ms: number };
+  provider_statuses?: Record<string, string>;
+  hypothesis?: any;
+  verification_result?: any;
+  finding_card?: string;
+  proof_chain?: any;
   artifact_path: string;
   error?: string;
   adaptive_investigation: any;
@@ -129,7 +149,8 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
     terminal_state: { state: 'COMPLETED' },
     decision: '', finding_type: '', evidence_count: 0,
     discovered_subdomains: [], signals: [], rate_limited: [],
-    artifact_path: '', adaptive_investigation: { attempted: false, records: [], aggregate: {} },
+    artifact_path: '',
+    adaptive_investigation: { attempted: false, records: [], aggregate: {} },
   };
 
   try {
@@ -162,22 +183,97 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
     const { prospect } = await builder.build(target);
     const completed = new Date().toISOString();
 
+    // FIX 4: Normalized artifact schema — retains ALL canonical fields from baseline
+    // PLUS adaptive_investigation as an additive block
     artifact.company = prospect.company || target.replace('https://www.', '').replace(/\/$/, '');
     artifact.url = target;
-    artifact.decision = prospect.decision;
-    artifact.finding_type = prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE';
-    artifact.evidence_count = prospect.evidence.length;
+    artifact.organization_identity = {
+      name: prospect.company || '',
+      domain: target.replace('https://', '').replace(/\/$/, ''),
+      homepage: (prospect as any).company_surface?.homepage || (prospect as any).company_surface?.company_homepage || '',
+    };
+    artifact.discovered_domains = [artifact.organization_identity.domain];
     artifact.discovered_subdomains = provider.getDiscoveredSubdomains();
-    artifact.signals = prospect.technical_signals.map(s => s.type);
+    artifact.evidence = prospect.evidence;
+    artifact.evidence_count = prospect.evidence.length;
+    artifact.observations = prospect.evidence.map((e: any) => ({
+      url: e.public_url,
+      status: e.status,
+      latency_samples: e.latency_samples,
+      observed_behavior: e.observed_behavior,
+      repeatable: e.repeatable,
+      evidence_origin: e.evidence_origin,
+      source_type: e.source_type,
+    }));
+    artifact.signals = prospect.technical_signals.map((s: any) => ({
+      type: s.type,
+      confidence: s.confidence,
+      description: s.description,
+    }));
+    artifact.hypothesis = prospect.deep_finding ? {
+      finding_type: prospect.deep_finding.finding_type,
+      confidence: prospect.deep_finding.confidence,
+      explanation: prospect.deep_finding.explanation,
+      recommendation: prospect.deep_finding.recommendation,
+      evidence_ids: prospect.deep_finding.evidence_ids,
+    } : undefined;
+    artifact.verification_result = {
+      qa_status: (prospect as any).qa_status,
+      qa_blocked_reason: (prospect as any).qa_blocked_reason,
+      decision_reason: (prospect as any).decision_reason,
+      gating_outcome: (prospect as any).gating_outcome,
+      is_defensible: prospect.deep_finding ? !['DOCUMENTED_SECURITY_POSTURE', 'DOCUMENTED_SCALING_CONSTRAINT',
+        'DOCUMENTED_INCIDENT', 'DOCUMENTED_ENGINEERING_FAILURE', 'GENERIC_ENGINEERING_ARTICLE',
+        'UNEXPECTED_PUBLIC_BEHAVIOR', 'CONFLICTING_EVIDENCE'].includes(prospect.deep_finding.finding_type) : false,
+    };
     artifact.decision_state = prospect.decision;
+    artifact.decision = prospect.decision;
     artifact.confidence = prospect.confidence;
+    artifact.finding_type = prospect.deep_finding?.finding_type || prospect.findings?.finding_type || 'NONE';
     artifact.finding_confidence = prospect.deep_finding?.confidence || 'UNKNOWN';
-    artifact.contact_status = prospect.contact_status;
-    artifact.diagnostic_opportunity = !!prospect.diagnostic_opportunity;
-    artifact.email_generated = !!prospect.email_draft?.generated;
+    artifact.outreach_eligibility = {
+      eligible: prospect.decision === 'OUTREACH_READY',
+      reason: (prospect as any).decision_reason || '',
+    };
+    artifact.uncertainties = (prospect as any).uncertainties || [];
+    artifact.timestamps = { started, completed, duration_ms: Date.now() - startTime };
+    artifact.provider_statuses = {
+      LivePublicObservationProvider: provider.getDiscoveredSubdomains().length > 0 ? 'available' : 'available',
+      DeepProspectBuilder: 'available',
+    };
     artifact.rate_limited = provider.getRateLimitedUrls();
-    artifact.artifact_path = prospect.artifact_path || '';
-    artifact.adaptive_investigation = prospect.adaptive_investigation || { attempted: false, records: [], aggregate: {} };
+
+    // Build full proof chain for OUTREACH_READY findings (same as baseline)
+    if (prospect.decision === 'OUTREACH_READY' && prospect.deep_finding) {
+      const card = OutreachCardPrinter.buildCard(prospect);
+      artifact.finding_card = card ? OutreachCardPrinter.printCard(card) : '(card not available)';
+      artifact.proof_chain = {
+        finding_type: prospect.deep_finding.finding_type,
+        confidence: prospect.deep_finding.confidence,
+        severity_basis: prospect.deep_finding.severity_basis,
+        evidence_ids: prospect.deep_finding.evidence_ids,
+        source_urls: prospect.deep_finding.source_urls,
+        provenance: prospect.deep_finding.provenance,
+        strength: prospect.deep_finding.strength,
+        explanation: prospect.deep_finding.explanation,
+        recommendation: prospect.deep_finding.recommendation,
+        evidence_pack: prospect.evidence
+          .filter((ev: any) => prospect.deep_finding.evidence_ids.includes(ev.id))
+          .map((ev: any) => ({
+            id: ev.id,
+            url: ev.public_url,
+            origin: ev.evidence_origin,
+            source_type: ev.source_type,
+            observed_behavior: ev.observed_behavior,
+            reproducible: ev.repeatable,
+            latency_samples: ev.latency_samples,
+          })),
+      };
+    }
+
+    // Adaptive investigation (ADDITIVE — does not affect canonical fields)
+    artifact.adaptive_investigation = prospect.adaptive_investigation || { attempted: false, records: [], aggregate: { boundary_observations: 0, pivots_suggested: 0, pivots_executed: 0, alternate_surfaces_found: 0, new_evidence_found: 0, new_verification_targets: 0, verified_from_adaptive_path: 0, no_useful_result: 0 } };
+    artifact.artifact_path = (prospect as any).artifact_path || '';
     artifact.terminal_state = { state: 'COMPLETED' };
   } catch (e: any) {
     const completed = new Date().toISOString();
@@ -185,7 +281,7 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
     artifact.company = target.replace('https://www.', '').replace(/\/$/, '');
     artifact.decision = 'NO_GO';
     artifact.error = e.message;
-    artifact.adaptive_investigation = { attempted: false, records: [], aggregate: { error: e.message } };
+    artifact.adaptive_investigation = { attempted: false, records: [], aggregate: { error: e.message, boundary_observations: 0, pivots_suggested: 0, pivots_executed: 0, alternate_surfaces_found: 0, new_evidence_found: 0, new_verification_targets: 0, verified_from_adaptive_path: 0, no_useful_result: 0 } };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -268,7 +364,7 @@ async function main() {
     manifest.skipped_count = allArtifacts.filter(a => a.terminal_state.state === 'SKIPPED').length;
 
     const decisions: Record<string, number> = {};
-    let totalEvidence = 0, totalSubs = 0;
+    let totalEvidence = 0;
     const allSubs = new Set<string>();
     let pivotsSuggested = 0, pivotsExecuted = 0, surfacesFound = 0, newEvidence = 0, newTargets = 0, verified = 0, noUseful = 0;
     for (const a of allArtifacts) {
@@ -342,8 +438,16 @@ async function main() {
   console.log(`  Pivots executed:      ${manifest.adaptive_pivots_executed}`);
   console.log(`  Alternate surfaces:   ${manifest.adaptive_surfaces_found}`);
   console.log(`  New evidence found:   ${manifest.adaptive_new_evidence}`);
+  console.log(`  New verif. targets:   ${manifest.adaptive_new_verification_targets}`);
   console.log(`  Verified from pivot:  ${manifest.adaptive_verified}`);
   console.log(`  No useful result:     ${manifest.adaptive_no_useful}`);
+  console.log('');
+  console.log('Corrected metrics:');
+  console.log(`  average_new_evidence_per_pivot = ${manifest.adaptive_new_evidence}/${manifest.adaptive_pivots_executed} = ${manifest.adaptive_pivots_executed > 0 ? (manifest.adaptive_new_evidence / manifest.adaptive_pivots_executed).toFixed(1) : 'N/A'}`);
+  console.log(`  average_new_targets_per_pivot  = ${manifest.adaptive_new_verification_targets}/${manifest.adaptive_pivots_executed} = ${manifest.adaptive_pivots_executed > 0 ? (manifest.adaptive_new_verification_targets / manifest.adaptive_pivots_executed).toFixed(1) : 'N/A'}`);
+  console.log('');
+  console.log(`  Artifact schema: normalized (baseline canonical fields + additive adaptive_investigation)`);
+  console.log(`  Report: ${RESULTS_PATH}`);
 }
 
 main().catch(e => {

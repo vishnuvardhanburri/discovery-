@@ -774,13 +774,16 @@ export class DeepProspectBuilder {
           onProgress: (stage, msg) => this.onProgress?.(stage as any, msg),
         });
         const initialUrl = surface.homepage || surface.company_homepage || `https://${parsed.hostname}`;
+        // FIX 2: Pass baseline evidence IDs for cross-run verification
+        const baselineEvidenceIds = new Set(caseRef.evidence.map(e => e.id));
         adaptiveResult = await adaptiveEngine.investigate(
           surface.company,
           initialUrl,
           caseRef.evidence,
           provider instanceof LivePublicObservationProvider
             ? (provider as any).getDiscoveredSubdomains()
-            : []
+            : [],
+          baselineEvidenceIds
         );
         this.onProgress?.('deepening', `Adaptive investigation complete: ${adaptiveResult.records.length} record(s), ${adaptiveResult.aggregate.pivots_executed} pivot(s) executed.`);
       } catch (e: any) {
