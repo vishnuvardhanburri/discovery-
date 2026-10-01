@@ -126,6 +126,7 @@ interface CompanyArtifact {
     reason?: string;
   };
   uncertainties?: any[];
+  rate_limited?: string[];
   timestamps?: {
     started: string;
     completed: string;
@@ -282,6 +283,7 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
       LivePublicObservationProvider: provider.getDiscoveredSubdomains().length > 0 ? 'available' : 'available',
       DeepProspectBuilder: 'available',
     };
+    artifact.rate_limited = provider.getRateLimitedUrls();
 
     // Build full proof chain for OUTREACH_READY findings
     if (prospect.decision === 'OUTREACH_READY' && prospect.deep_finding) {
@@ -350,6 +352,8 @@ async function main() {
     decisions: {},
     total_evidence_records: 0,
     total_subdomains_discovered: 0,
+    total_rate_limited_urls: 0,
+    rate_limited_targets: 0,
     status: 'RUNNING',
   };
 
@@ -408,17 +412,24 @@ async function main() {
 
     const decisions: Record<string, number> = {};
     let totalEvidence = 0;
-    let totalSubs = 0;
+    let totalRateLimited = 0;
     const allSubs = new Set<string>();
+    const rateLimitedTargets = new Set<string>();
     for (const a of allArtifacts) {
       const d = a.decision || 'NONE';
       decisions[d] = (decisions[d] || 0) + 1;
       totalEvidence += a.evidence?.length || 0;
       for (const s of (a.discovered_subdomains || [])) allSubs.add(s);
+      if ((a.rate_limited || []).length > 0) {
+        totalRateLimited += a.rate_limited!.length;
+        rateLimitedTargets.add(a.url);
+      }
     }
     manifest.decisions = decisions;
     manifest.total_evidence_records = totalEvidence;
     manifest.total_subdomains_discovered = allSubs.size;
+    manifest.total_rate_limited_urls = totalRateLimited;
+    manifest.rate_limited_targets = rateLimitedTargets.size;
     writeManifest(manifest);
   }
 
