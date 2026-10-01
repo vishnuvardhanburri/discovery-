@@ -618,7 +618,7 @@ export class AdaptiveInvestigationEngine {
               verification_attempted: true,
               verification_result: verificationTargets.length > 0 ? 'evidence_observed' : 'no_verification_target',
               final_decision: newEvs.length > 0 ? 'potential' : 'no_action',
-              outcome: newEvs.length > 0 ? (verificationTargets.length > 0 ? 'NEW_VERIFICATION_TARGET' : 'NEW_EVIDENCE_FOUND') : 'NO_USEFUL_RESULT',
+              outcome: newEvs.length > 0 ? (newEvs.filter(e => e.repeatable).length > 0 ? 'NEW_EVIDENCE_FOUND' : 'NEW_VERIFICATION_TARGET') : 'NO_USEFUL_RESULT',
               attribution_confidence: 'HIGH',
               started_at: pivotStarted,
               completed_at: now(),
@@ -626,7 +626,7 @@ export class AdaptiveInvestigationEngine {
 
             if (newEvs.length === 0) {
               noUsefulResult++;
-            } else if (verificationTargets.length > 0) {
+            } else if (newEvs.filter(e => e.repeatable).length > 0) {
               verifiedFromAdaptive++;
             }
           } else {

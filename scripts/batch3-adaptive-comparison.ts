@@ -17,7 +17,7 @@
  */
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
 import { OutreachCardPrinter } from '../src/server/OutreachCardPrinter';
-import { LivePublicObservationProvider } from '../server/LivePublicObservationProvider';
+import { LivePublicObservationProvider } from '../src/server/LivePublicObservationProvider';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
