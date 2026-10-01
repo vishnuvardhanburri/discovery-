@@ -10,7 +10,7 @@ import json, os
 from collections import Counter
 
 BASELINE_DIR = '/tmp/xavira-batch3-runs/batch3_run_1790873841985'
-TREATMENT_DIR = '/tmp/xavira-batch3-runs/adaptive_run_1790879512618'
+TREATMENT_DIR = '/tmp/xavira-batch3-runs/adaptive_run_1790887424419'
 BASE_ART = os.path.join(BASELINE_DIR, 'artifacts')
 TREAT_ART = os.path.join(TREATMENT_DIR, 'artifacts')
 
@@ -438,8 +438,6 @@ print(f'  Corrected metrics:')
 print(f'    adaptive_execution_rate: {companies_with_pivots}/50 = {companies_with_pivots/50*100:.1f}%')
 print(f'    pivot_execution_rate: {pe}/{ps} = {pe/max(ps,1)*100:.1f}%' if ps > 0 else f'    pivot_execution_rate: {pe}/{ps} = NOT_AVAILABLE')
 print(f'    alternate_surface_discovery_rate: {total_alternate_surfaces}/{pe} = {total_alternate_surfaces/max(pe,1)*100:.1f}%' if pe > 0 else f'    alternate_surface_discovery_rate: {total_alternate_surfaces}/{pe} = NOT_AVAILABLE')
-print(f'    new_evidence_rate: {total_new_evidence}/{pe} = {total_new_evidence/max(pe,1)*100:.1f}% (evidence per pivot, capped at 10/pivot)')
-print(f'    new_target_rate: {total_new_targets}/{pe} = {total_new_targets/max(pe,1)*100:.1f}% (targets per pivot)')
 print(f'    adaptive_verification_rate: {total_verified}/{total_new_targets} = {total_verified/max(total_new_targets,1)*100:.1f}%' if total_new_targets > 0 else f'    adaptive_verification_rate: {total_verified}/{total_new_targets} = NOT_AVAILABLE')
 print(f'    average_new_evidence_per_pivot: {total_new_evidence}/{pe} = {total_new_evidence/max(pe,1):.1f}')
 print(f'    average_new_targets_per_pivot: {total_new_targets}/{pe} = {total_new_targets/max(pe,1):.1f}')

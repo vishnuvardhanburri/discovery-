@@ -18,6 +18,7 @@
 import { DeepProspectBuilder } from '../src/server/DeepProspectBuilder';
 import { OutreachCardPrinter } from '../src/server/OutreachCardPrinter';
 import { LivePublicObservationProvider } from '../src/server/LivePublicObservationProvider';
+import { AdaptiveInvestigationEngine, type AdaptiveInvestigationResult, verifyAggregate } from '../src/server/AdaptiveInvestigationEngine';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -273,6 +274,17 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
 
     // Adaptive investigation (ADDITIVE — does not affect canonical fields)
     artifact.adaptive_investigation = prospect.adaptive_investigation || { attempted: false, records: [], aggregate: { boundary_observations: 0, pivots_suggested: 0, pivots_executed: 0, alternate_surfaces_found: 0, new_evidence_found: 0, new_verification_targets: 0, verified_from_adaptive_path: 0, no_useful_result: 0 } };
+    // FIX 6: Immutable audit invariant — verify aggregate before persisting
+    if (artifact.adaptive_investigation.attempted) {
+      const audit = verifyAggregate(artifact.adaptive_investigation as AdaptiveInvestigationResult);
+      if (!audit.valid) {
+        console.error(`  ⚠ AUDIT FAILED for ${artifact.company}: ${audit.errors.join('; ')}`);
+        for (const rec of artifact.adaptive_investigation.records || []) {
+          console.error(`    record ${rec.investigation_id}: ${rec.new_evidence_ids.length} ev, ${rec.new_target_ids.length} targets`);
+        }
+      }
+    }
+
     artifact.artifact_path = (prospect as any).artifact_path || '';
     artifact.terminal_state = { state: 'COMPLETED' };
   } catch (e: any) {
