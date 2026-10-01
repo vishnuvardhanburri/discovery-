@@ -159,6 +159,7 @@ import type { ProviderCapabilities } from '../src/server/providers/ProviderInter
 
 class TestProvider extends CompanyDataProvider {
   name = 'test';
+  readonly costClass = 'FREE';
   enabled = true;
   capabilities: ProviderCapabilities = { searchCompanies: true, resolveCompany: true, findPeople: true, findContacts: true, enrichCompany: true, enrichPerson: true, verifyContact: false };
   private data: any[];

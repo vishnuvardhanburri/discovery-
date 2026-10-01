@@ -11,6 +11,7 @@
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, Provenance } from './Model';
 import type { ProviderCapabilities } from './ProviderInterface';
 import { CompanyDataProvider } from './ProviderInterface';
+import type { ProviderCostClass } from '../IntelligenceCase';
 
 // Reusable CSV parser (handles quoted fields with embedded commas/newlines).
 function parseCsvRows(text: string): string[][] {
@@ -93,6 +94,7 @@ export interface CsvImportResult {
 }
 
 export class CSVProvider extends CompanyDataProvider {
+  readonly costClass: ProviderCostClass = 'FREE';
   readonly name = 'csv';
   readonly enabled = true;
   readonly capabilities: ProviderCapabilities = {

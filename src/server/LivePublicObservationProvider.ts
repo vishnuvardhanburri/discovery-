@@ -1,10 +1,11 @@
-import { Evidence, PublicObservationProvider, ObservationOptions, ObservationResult, HttpFetcher, SourceState, EvidenceClassification, Provenance, ProviderExecutionResult } from './IntelligenceCase';
+import { Evidence, PublicObservationProvider, ObservationOptions, ObservationResult, HttpFetcher } from './IntelligenceCase';
 import { randomBytes } from 'crypto';
 
-/**
- * No longer using a static list of SUBDOMAIN_CANDIDATES to avoid blind enumeration.
- * Discovery is now handled by the SourceDiscoveryOrchestrator.
- */
+/** Conservative subdomain candidates to probe (only on the same root domain). */
+const SUBDOMAIN_CANDIDATES = ['api', 'www', 'docs', 'developer', 'status', 'api-docs'];
+
+/** Conservative API endpoint paths to probe on discovered subdomains. */
+const API_PATH_CANDIDATES = ['/v1', '/v1/', '/api/v1', '/api', '/health', '/healthz', '/status', '/.well-known/security.txt'];
 
 /** Extract the registrable root domain from a hostname (e.g. "example.com" from "api.sub.example.com"). */
 function extractRootDomain(hostname: string): string {
@@ -23,16 +24,37 @@ function isSameRootDomain(hostname: string, rootDomain: string): boolean {
 
 export class LivePublicObservationProvider implements PublicObservationProvider {
   private visited = new Set<string>();
+  private queue: string[] = [];
+  /** Subdomains discovered from public evidence (HTML links, canonical, sitemap). */
+  private discoveredSubdomains: Set<string> = new Set();
   private rateLimitedUrls: string[] = [];
   private discovery_errors = 0;
 
   constructor(private options?: {
     onPage?: (url: string, status: number, latency: number) => void;
+    /** Injectable fetcher (defaults to the runtime global fetch). */
     fetcher?: HttpFetcher;
+    /** Polite delay between requests (default 200ms). */
     delayMs?: number;
+    /** Delay between reproducibility samples (default 300ms). */
     sampleDelayMs?: number;
+    /** Operator-supplied target subdomains to include (e.g. ['api.example.com']). */
+    extraSubdomains?: string[];
+    /** Maximum requests across all subdomains. */
     maxRequests?: number;
   }) {}
+
+  /** Returns subdomains discovered during the last observation run. */
+  getDiscoveredSubdomains(): string[] {
+    return [...this.discoveredSubdomains];
+  }
+
+  /** Returns URLs that returned HTTP 429 (rate-limited), distinct from unreachable. */
+  getRateLimitedUrls(): string[] {
+    return this.rateLimitedUrls;
+  }
+
+  // ── Shared helpers ──────────────────────────────────────────────────────────
 
   /** Probe a single URL and return the response details. */
   private async probeUrl(url: string, options?: ObservationOptions): Promise<{
@@ -55,9 +77,10 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     };
   }
 
-  /** Observe a single URL: fetch, measure, classify, and return evidence. */
-  private async observeUrl(url: string, options: any, notTested: string[], rootDomain: string, provenance: Partial<Provenance>): Promise<{
+  /** Observe a single URL: fetch, measure, classify, and return evidence + extracted links. */
+  private async observeUrl(url: string, options: any, notTested: string[], rootDomain: string): Promise<{
     evidence: Evidence | null;
+    subdomains: string[];
   }> {
     const start = performance.now();
     let response: Response;
@@ -75,7 +98,7 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
         this.discovery_errors++;
         console.log(`[FETCH_FAILED] ${url}: ${err.message}`);
       }
-      return { evidence: null };
+      return { evidence: null, subdomains: [] };
     }
 
     const latency = Math.round(performance.now() - start);
@@ -86,34 +109,39 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       this.rateLimitedUrls.push(url);
     }
 
+    const subtypes: string[] = [];
     const isJson = response.headers.get('content-type')?.includes('application/json');
     const source_type = isJson || url.includes('/api/') ? 'API_ENDPOINT' : 'PUBLIC_DOCUMENTATION';
 
-    const evidence = this.createEvidence(url, status, `HTTP ${status} observed`, 1, false, notTested, text, provenance);
+    const evidence = this.createEvidence(url, status, `HTTP ${status} observed`, 1, false, notTested, text);
     evidence.latency_ms = latency;
     evidence.baseline_latency_ms = latency;
     evidence.source_type = source_type;
 
-    // ALWAYS perform repeated observations for stability measurement,
-    // regardless of whether the first sample is "interesting".
-    const samples = await this.performRepeatedObservations(url, 2, options);
-    evidence.latency_samples = [latency, ...samples.map(s => s.latency)];
-    evidence.baseline_latency_ms = Math.min(...evidence.latency_samples) || latency;
-    evidence.reproductions = 1 + samples.length;
-
-    // Repeatability is a transport fact: did the status remain consistent?
-    evidence.repeatable = samples.every(s => s.status === status);
-
-    // BEHAVIORAL PROMOTION:
-    // We preserve the existing thresholds for 'observed_behavior' markers,
-    // but we no longer use them as gates for data collection.
     const latencyTriggered = latency > 1500;
-    if (status >= 500 && evidence.repeatable && evidence.latency_samples.length >= 3) {
-      evidence.observed_behavior = `Repeated HTTP ${status} response`;
-    } else if (latencyTriggered && evidence.repeatable) {
-      evidence.observed_behavior = evidence.observed_behavior
-        ? `${evidence.observed_behavior} — slow latency reproduced across ${evidence.reproductions} sample(s).`
-        : `Slow latency (${latency}ms) reproduced across ${evidence.reproductions} sample(s).`;
+
+    if (status >= 500 || latencyTriggered || isJson) {
+      const samples = await this.performRepeatedObservations(url, 2, options);
+      evidence.latency_samples = [latency, ...samples.map(s => s.latency)];
+      evidence.baseline_latency_ms = Math.min(...evidence.latency_samples) || latency;
+      evidence.reproductions = 1 + samples.length;
+
+      if (latencyTriggered) {
+        const slowSamples = evidence.latency_samples.filter(s => s >= 1000).length;
+        evidence.repeatable = slowSamples >= Math.ceil(evidence.latency_samples.length / 2)
+          && samples.every(s => s.status === status);
+      } else {
+        evidence.repeatable = samples.every(s => s.status === status);
+      }
+
+      if (status >= 500 && evidence.repeatable && evidence.latency_samples.length >= 3) {
+        evidence.observed_behavior = `Repeated HTTP ${status} response`;
+      }
+      if (latencyTriggered && evidence.repeatable) {
+        evidence.observed_behavior = evidence.observed_behavior
+          ? `${evidence.observed_behavior} — slow latency reproduced across ${evidence.reproductions} sample(s).`
+          : `Slow latency (${latency}ms) reproduced across ${evidence.reproductions} sample(s).`;
+      }
     }
 
     if (isJson && text) {
@@ -131,11 +159,100 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       } catch (e) {}
     }
 
-    return { evidence };
+    // Discover subdomains from this response
+    const subs = this.discoverSubdomains(text, url, rootDomain);
+
+    this.options?.onPage?.(url, status, latency);
+    return { evidence, subdomains: subs };
   }
 
-  async observePublicSurface(url: string, options?: any): Promise<ProviderExecutionResult<Evidence>> {
+  /** Extract subdomains from HTML links, canonical URLs, script/src, JSON-LD. */
+  private discoverSubdomains(html: string, baseUrl: string, rootDomain: string): string[] {
+    const found: string[] = [];
+    if (!html) return found;
+    const seen = new Set<string>();
+
+    const addHost = (raw: string) => {
+      try {
+        const host = new URL(raw, baseUrl).hostname;
+        if (isSameRootDomain(host, rootDomain) && host !== rootDomain && !host.startsWith('www.')) {
+          if (!seen.has(host)) {
+            seen.add(host);
+            found.push(host);
+            this.discoveredSubdomains.add(host);
+          }
+        }
+      } catch (e) {}
+    };
+
+    // 1. <a href> links
+    const linkRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']+)["']/gi;
+    let match;
+    while ((match = linkRegex.exec(html)) !== null) addHost(match[1]);
+
+    // 2. <link rel="canonical">
+    const canonRegex = /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/gi;
+    let m2;
+    while ((m2 = canonRegex.exec(html)) !== null) addHost(m2[1]);
+
+    // 3. <script src> / <link href> asset hosts
+    const assetRegex = /<(?:script|link)[^>]+(?:src|href)=["']([^"']+)["']/gi;
+    let m3;
+    while ((m3 = assetRegex.exec(html)) !== null) addHost(m3[1]);
+
+    // 4. JSON-LD "url" fields
+    const jsonLdRegex = /"url"\s*:\s*"(https?:\/\/[^"]+)"/gi;
+    let m4;
+    while ((m4 = jsonLdRegex.exec(html)) !== null) addHost(m4[1]);
+
+    return found;
+  }
+
+  /** Build the full set of subdomain candidates, deduplicated, same-root only. */
+  private buildSubdomainCandidates(rootDomain: string, primaryHost: string): string[] {
+    const candidates = new Set<string>();
+
+    // 1. Discovered from public evidence
+    for (const sub of this.discoveredSubdomains) {
+      if (isSameRootDomain(sub, rootDomain) && sub !== primaryHost) {
+        candidates.add(sub);
+      }
+    }
+
+    // 2. Operator-supplied explicit targets
+    if (this.options?.extraSubdomains) {
+      for (const sub of this.options.extraSubdomains) {
+        const host = sub.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        if (isSameRootDomain(host, rootDomain)) {
+          candidates.add(host);
+        }
+      }
+    }
+
+    // 3. Conservative candidates (api, www, docs, developer, status)
+    for (const prefix of SUBDOMAIN_CANDIDATES) {
+      const host = `${prefix}.${rootDomain}`;
+      candidates.add(host);
+    }
+
+    return [...candidates];
+  }
+
+  /** Extract the root domain for API path probing from a URL. */
+  private getApiPathCandidates(currentUrl: string): string[] {
+    // Only probe API paths on URLs that look like API endpoints
+    if (currentUrl.includes('/api/') || currentUrl.includes('/v1/')) {
+      return [currentUrl];
+    }
+    return [];
+  }
+
+  // ── Main entry point ────────────────────────────────────────────────────────
+
+  async observePublicSurface(url: string, options?: any): Promise<ObservationResult> {
     this.visited.clear();
+    this.queue = [];
+    this.discoveredSubdomains.clear();
     this.rateLimitedUrls = [];
     this.discovery_errors = 0;
 
@@ -144,20 +261,12 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     const targetHostname = baseUrl.hostname;
     const rootDomain = extractRootDomain(targetHostname);
 
+    // IDENTITY GUARD
     if (options?.requiredOrigin) {
-      const urlObj = new URL(url);
-      const urlHostname = urlObj.hostname;
-      const required = options.requiredOrigin;
-
-      if (urlHostname !== required && !urlHostname.endsWith('.' + required)) {
-        console.log(`[IDENTITY_GUARD] Blocked access to external origin: ${urlHostname}. Required: ${required}`);
+      if (targetOrigin !== options?.requiredOrigin) {
+        console.log(`[IDENTITY_GUARD] Blocked access to external origin: ${targetOrigin}. Required: ${options?.requiredOrigin}`);
         this.discovery_errors++;
-        return {
-          status: 'UNAVAILABLE',
-          provider: 'LivePublicObservationProvider',
-          observations: [],
-          metadata: { requestsAttempted: 0 }
-        };
+        return { evidence: [], discovery_errors: 1 };
       }
     }
 
@@ -166,7 +275,10 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     let requestCount = 0;
     const maxRequests = this.options?.maxRequests ?? 20;
 
-    this.queue = [url];
+    // Phase 1: Crawl the primary origin (same as original implementation)
+    this.queue.push(url);
+    this.queue.push(`${targetOrigin}/robots.txt`);
+    this.queue.push(`${targetOrigin}/sitemap.xml`);
 
     while (this.queue.length > 0 && requestCount < maxRequests) {
       const currentUrl = this.queue.shift()!;
@@ -174,38 +286,56 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       this.visited.add(currentUrl);
 
       requestCount++;
-      const { evidence } = await this.observeUrl(currentUrl, options, notTested, rootDomain, {
-        source_url: currentUrl,
-        canonical_url: currentUrl,
-        retrieval_timestamp: new Date().toISOString(),
-        provider: 'LivePublicObservationProvider',
-        attribution: 'Direct Observation',
-        classification: 'OBSERVATION'
-      });
+      const { evidence, subdomains } = await this.observeUrl(currentUrl, options, notTested, rootDomain);
       if (evidence) evidenceList.push(evidence);
+
+      // Discover more links from HTML pages (same-origin only)
+      // This is handled inside observeUrl via discoverSubdomains, but also
+      // follow same-origin links for same-origin crawling
+      if (evidence?.raw_observation && evidence.source_type === 'PUBLIC_DOCUMENTATION') {
+        const html = evidence.raw_observation;
+        const linkRegex = /<a\s+(?:[^>]*?\s+)?href=["']([^"']+)["']/gi;
+        let match;
+        while ((match = linkRegex.exec(html)) !== null) {
+          try {
+            const discoveredUrl = new URL(match[1], currentUrl).href;
+            const discoveredHost = new URL(discoveredUrl).hostname;
+            if (isSameRootDomain(discoveredHost, rootDomain) && !this.visited.has(discoveredUrl)) {
+              if (this.queue.length < 30) this.queue.push(discoveredUrl);
+            }
+          } catch (e) {}
+        }
+      }
 
       await new Promise(r => setTimeout(r, this.options?.delayMs ?? 200));
     }
 
-    let status: ProviderExecutionStatus = 'SUCCESS';
-    if (this.rateLimitedUrls.length > 0) {
-      status = 'RATE_LIMITED';
-    } else if (evidenceList.length === 0) {
-      status = 'EMPTY';
-    } else if (this.discovery_errors > (requestCount * 0.5)) {
-      status = 'ERROR';
+    // Phase 2: Discover and probe subdomains
+    // Re-scan discovered evidence for subdomains we may have found
+    const allSubdomainCandidates = this.buildSubdomainCandidates(rootDomain, targetHostname);
+
+    for (const candidate of allSubdomainCandidates) {
+      const subOrigin = `https://${candidate}`;
+      const pathsToProbe = ['', '/robots.txt', '/sitemap.xml', ...API_PATH_CANDIDATES];
+
+      for (const p of pathsToProbe) {
+        if (requestCount >= maxRequests) break;
+        const probeUrl = `${subOrigin}${p}`;
+        if (this.visited.has(probeUrl)) continue;
+        this.visited.add(probeUrl);
+
+        requestCount++;
+        const { evidence, subdomains } = await this.observeUrl(probeUrl, options, notTested, rootDomain);
+        if (evidence) evidenceList.push(evidence);
+
+        await new Promise(r => setTimeout(r, this.options?.delayMs ?? 200));
+      }
     }
 
-    return {
-      status,
-      provider: 'LivePublicObservationProvider',
-      observations: evidenceList,
-      metadata: {
-        requestsAttempted: requestCount,
-        sourceCount: evidenceList.length
-      }
-    };
+    return { evidence: evidenceList, discovery_errors: this.discovery_errors };
   }
+
+  // ── Repeated observations (same logic as original, unchanged) ──────────────
 
   private async performRepeatedObservations(url: string, count: number, options?: ObservationOptions) {
     const results = [];
@@ -217,10 +347,14 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
         const res = await fetcher(url, { method: 'GET', headers: options?.headers || {}, signal: AbortSignal.timeout(options?.timeoutMs || 8000) });
         await res.arrayBuffer().catch(()=>null);
         results.push({ status: res.status, latency: Math.round(performance.now() - start) });
-      } catch (err) {}
+      } catch (err) {
+        // Drop network failures from repetition samples safely
+      }
     }
     return results;
   }
+
+  // ── Field extraction (unchanged) ────────────────────────────────────────────
 
   private extractFields(obj: any, prefix = '', limit = 100): string[] {
     let fields: string[] = [];
@@ -239,22 +373,12 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
     return Array.from(new Set(fields)).slice(0, limit);
   }
 
-  private createEvidence(url: string, status: number, behavior: string, reps: number, rep: boolean, notTested: string[], text: string = '', provenance: Partial<Provenance>): Evidence {
+  private createEvidence(url: string, status: number, behavior: string, reps: number, rep: boolean, notTested: string[], text: string = ''): Evidence {
     return {
       id: 'ev_live_' + randomBytes(8).toString('hex'),
-      provenance: {
-        source_url: provenance.source_url || url,
-        canonical_url: provenance.canonical_url || url,
-        source_type: provenance.source_type || 'UNKNOWN',
-        discovery_mechanism: provenance.discovery_mechanism || 'API_DISCOVERY',
-        retrieval_timestamp: provenance.retrieval_timestamp || new Date().toISOString(),
-        provider: provenance.provider || 'LivePublicObservationProvider',
-        attribution: provenance.attribution || 'Direct Observation',
-        classification: provenance.classification || 'OBSERVATION'
-      },
       evidence_origin: 'REAL_PUBLIC_OBSERVATION',
       public_url: url,
-      source_type: provenance.source_type || 'UNKNOWN',
+      source_type: 'UNKNOWN',
       method: 'GET',
       status,
       observed_behavior: behavior,
@@ -264,7 +388,7 @@ export class LivePublicObservationProvider implements PublicObservationProvider 
       not_tested: notTested,
       retrieved_at: new Date().toISOString(),
       evidence_text: text,
-      raw_observation: text
+      raw_observation: text // Ensure we preserve the body content for extractors
     };
   }
 }

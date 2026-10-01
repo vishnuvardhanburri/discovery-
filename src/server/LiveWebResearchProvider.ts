@@ -85,7 +85,7 @@ export class LiveWebResearchProvider {
     // Using NullSearchProvider for the mock/baseline, but in production this uses the actual provider.
     const provider = new NullSearchProvider();
     const resp = await provider.search(query, { maxResults: 8 });
-    return resp.results || [];
+    return (resp.results || []).map(r => ({ title: r.title, snippet: r.snippet, url: r.url, source: resp.providerName }));
   }
 
   async getGithubRepos(org: string, keywords: string[]): Promise<GithubRepoMeta[]> {
@@ -171,7 +171,7 @@ export class LiveWebResearchProvider {
           try {
             const resp = await searchProvider.search(q.query, { maxResults: maxResultsPerQuery } as SearchOptions);
             const results = resp.results || [];
-            this.cache.set(q.query, results);
+            this.cache.set(q.query, results as any);
             queriesExecuted.push({ query: q.query, results: results.length, cached: false });
             this.collectSearchEvidence(results, evidence, discoveredPages, htmlByUrl, ownerCandidates, q.category, errors);
           } catch (e: any) {

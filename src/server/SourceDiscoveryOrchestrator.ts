@@ -4,7 +4,8 @@ import {
   SourceType,
   Provenance,
   EvidenceClassification,
-  SourceState
+  SourceState,
+  HttpFetcher
 } from './IntelligenceCase';
 import { LivePublicObservationProvider } from './LivePublicObservationProvider';
 import { TargetedSearchProvider } from './providers/TargetedSearchProvider';
@@ -18,8 +19,74 @@ export interface DiscoveryURL {
   attribution: string;
 }
 
+export interface DiscoveredSource {
+  source_id: string;
+  kind: string;
+  url: string;
+  title: string | null;
+  tier: number;
+  discovered_via: string;
+  relationship: 'OFFICIAL' | 'LINKED' | 'DISCOVERED' | 'LIKELY' | 'VERIFIED';
+  confidence: number;
+  provenance: string;
+  freshness: any;
+  html: string | null;
+  status: number | null;
+  blocked: boolean;
+  error: string | null;
+}
+
+export interface SourceDiscoveryOptions {
+  fetcher?: HttpFetcher;
+  searchProvider?: any;
+  maxSources?: number;
+  companyName: string;
+  domain: string;
+  seedUrls?: string[];
+  onProgress?: (stage: string, message: string) => void;
+}
+
+export interface SourceDiscoveryResult {
+  sources: DiscoveredSource[];
+  htmlByUrl: Map<string, string>;
+  evidence: Evidence[];
+  errors: string[];
+  blockedSources: DiscoveredSource[];
+}
+
 export class SourceDiscoveryOrchestrator {
   private githubWeb = new GitHubWebProvider();
+
+  /**
+   * Static entry point for source discovery. Creates a minimal orchestrator
+   * instance and delegates to discoverTechnicalSurfaces.
+   */
+  static async discover(options: SourceDiscoveryOptions): Promise<SourceDiscoveryResult> {
+    const { companyName, domain, seedUrls = [], maxSources = 40, onProgress = () => {} } = options;
+    const fetcher = options.fetcher || (globalThis.fetch as any);
+    const observationProvider = new LivePublicObservationProvider({ fetcher, maxRequests: maxSources });
+    const searchProvider = new TargetedSearchProvider();
+    const budget = new ResearchBudget();
+    const orch = new SourceDiscoveryOrchestrator(observationProvider, searchProvider, budget);
+
+    onProgress('discovery', `Starting source discovery for ${companyName} (${domain})`);
+
+    const caseState: IntelligenceCase = {
+      company: companyName,
+      domain,
+      company_surface: { company: companyName, origin: domain, company_homepage: `https://${domain}`, homepage: `https://${domain}`, discovered_pages: [], page_categories: {} },
+    } as any;
+
+    const result = await orch.discoverTechnicalSurfaces(caseState);
+
+    return {
+      sources: [],
+      htmlByUrl: new Map(),
+      evidence: result.newEvidence,
+      errors: [],
+      blockedSources: [],
+    };
+  }
 
   constructor(
     private observationProvider: LivePublicObservationProvider,
@@ -72,12 +139,12 @@ export class SourceDiscoveryOrchestrator {
     for (const query of searchQueries) {
       if (!this.budget.checkAndConsume('QUERY', 'search', caseState)) break;
 
-      const results = await this.searchProvider.discoverSource('TECHNICAL_SURFACE', query);
-      for (const res of results) {
+      const searchResult = await this.searchProvider.discoverSource(caseState.company, caseState.company_surface?.origin || '', 'BROAD');
+      for (const url of (searchResult.results || [])) {
         discoveredUrls.push({
-          url: res.url,
+          url,
           mechanism: 'SEARCH',
-          type: this.inferSourceType(res.url),
+          type: this.inferSourceType(url),
           attribution: `Search Query: ${query}`
         });
       }
@@ -144,7 +211,7 @@ export class SourceDiscoveryOrchestrator {
       return paths.map(p => ({
         url: `https://${url.split('/')[2]}${p}`,
         mechanism: 'ROBOTS',
-        type: 'SURFACE',
+        type: 'OTHER_PUBLIC_SOURCE' as SourceType,
         attribution: 'Found in robots.txt'
       }));
     } catch {

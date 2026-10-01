@@ -70,7 +70,7 @@ export interface ResearchControllerOptions {
 
 export class XaviraResearchController {
   private readonly fetcher: HttpFetcher;
-  private readonly searchProvider?: SearchProvider;
+  readonly searchProvider?: SearchProvider;
   private readonly modelGateway?: any;
   private readonly artifactsDir: string;
   private readonly maxTriageRuntimeMs: number;

@@ -157,7 +157,7 @@ console.log('\n--- 3. DeepSignalExtractor: provenance split + provenance on sign
   const blogHtml = '<html><body><article>Available on AWS, Azure, and GCP.</article></body></html>';
   const pages: DiscoveredPage[] = [{ url: 'https://acme.com/blog', path: '/blog', category: 'blog' }];
   const htmlByUrl = new Map([[pages[0].url, blogHtml]]);
-  const extracted = DeepSignalExtractor.extract(pages, htmlByUrl, [], { onProgress: () => {} });
+  const extracted = DeepSignalExtractor.extract(pages, htmlByUrl, [], 'test', { onProgress: () => {} });
   assert(extracted.every(s => typeof s.provenance === 'string'), 'every extracted signal carries a provenance');
 
   const arch = extracted.find(s => s.type === 'ARCHITECTURE_DISCUSSION');
@@ -248,7 +248,7 @@ console.log('\n--- 5. Regression: generic cloud prose / plain blog line are NOT 
   const blogHtml = '<html><body><article>Available on AWS, Azure, and GCP.</article></body></html>';
   const pages: DiscoveredPage[] = [{ url: 'https://acme.com/blog', path: '/blog', category: 'blog' }];
   const htmlByUrl = new Map([[pages[0].url, blogHtml]]);
-  const sigs = DeepSignalExtractor.extract(pages, htmlByUrl, [], { onProgress: () => {} });
+  const sigs = DeepSignalExtractor.extract(pages, htmlByUrl, [], 'test', { onProgress: () => {} });
 
   const arch = sigs.find(s => s.type === 'ARCHITECTURE_DISCUSSION');
   assert(!!arch, 'generic cloud prose still registers an ARCHITECTURE_DISCUSSION signal');
@@ -262,7 +262,7 @@ console.log('\n--- 5. Regression: generic cloud prose / plain blog line are NOT 
   // A plain blog line with no architecture content -> not ARCHITECTURE_DISCUSSION, not a finding.
   const plainHtml = '<html><body><article>We shipped a new feature this week to improve customer experience.</article></body></html>';
   const plainPages: DiscoveredPage[] = [{ url: 'https://acme.com/blog', path: '/blog', category: 'blog' }];
-  const plainSigs = DeepSignalExtractor.extract(plainPages, new Map([[plainPages[0].url, plainHtml]]), [], { onProgress: () => {} });
+  const plainSigs = DeepSignalExtractor.extract(plainPages, new Map([[plainPages[0].url, plainHtml]]), [], 'test', { onProgress: () => {} });
   assertEq(plainSigs.find(s => s.type === 'ARCHITECTURE_DISCUSSION'), undefined, 'plain blog line is NOT categorised as ARCHITECTURE_DISCUSSION');
   assert(detectFinding(plainSigs, []) === null, 'plain blog line does NOT become a finding');
 }

@@ -10,6 +10,7 @@
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, SourceEntry, SourceCategory } from './Model';
 import type { ProviderCapabilities } from './ProviderInterface';
 import { CompanyDataProvider } from './ProviderInterface';
+import type { ProviderCostClass } from '../IntelligenceCase';
 import { GrowjoProvider } from '../GrowjoProvider';
 import type { GrowjoCompany } from '../DeepTypes';
 
@@ -20,6 +21,7 @@ export interface GrowjoProviderOptions {
 }
 
 export class GrowjoProviderAdapter extends CompanyDataProvider {
+  readonly costClass: ProviderCostClass = 'FREE';
   readonly name = 'growjo';
   readonly enabled: boolean;
   readonly capabilities: ProviderCapabilities = {

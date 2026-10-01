@@ -5,19 +5,29 @@ import { SurfaceSemanticAssessment, FunctionalRole, AuthExpectation } from './Se
 
 export class SurfaceSemanticValidator {
   async validate(
-    surface: ExternalSurface, 
-    evidenceStore: Evidence[], 
+    surface: ExternalSurface,
+    evidenceStore: Evidence[],
     identityGraph: OrganizationIdentityGraph
   ): Promise<SurfaceSemanticAssessment> {
     const surfaceEvidence = evidenceStore.filter(e => e.public_url === surface.url);
     const allText = surfaceEvidence.map(e => e.observed_behavior || '').join(' ').toLowerCase();
 
-    // RULE: Hostname labels are hints, NOT proof.
-    // We start with UNKNOWN and only promote if evidence exists.
+    // GOLD MINE LOGIC: Use the discovery surface type as a primary hint.
     let role: FunctionalRole = 'UNKNOWN';
-    let authExpectation: AuthExpectation = 'AUTH_UNKNOWN';
 
-    // 1. Functional Role Classification based on evidence
+    // Mapping discovery types to functional roles
+    const typeMap: Record<string, FunctionalRole> = {
+      'API': 'API',
+      'AUTH': 'AUTHENTICATION',
+      'ADMIN': 'ADMINISTRATION',
+      'STATUS': 'STATUS',
+      'DOCS': 'DOCUMENTATION',
+      'SERVICE': 'SERVICE'
+    };
+
+    role = typeMap[surface.type] || 'UNKNOWN';
+
+    // Override role if explicit evidence is found
     if (allText.includes('api') || allText.includes('endpoint') || allText.includes('json')) {
       role = 'API';
     } else if (allText.includes('login') || allText.includes('sign-in') || allText.includes('auth')) {
@@ -26,13 +36,10 @@ export class SurfaceSemanticValidator {
       role = 'STATUS';
     } else if (allText.includes('admin') || allText.includes('dashboard')) {
       role = 'ADMINISTRATION';
-    } else if (allText.includes('documentation') || allText.includes('guide')) {
-      role = 'DOCUMENTATION';
-    } else if (allText.includes('legacy') || allText.includes('deprecated')) {
-      role = 'LEGACY';
     }
 
-    // 2. Expectation Establishment
+    let authExpectation: AuthExpectation = 'AUTH_UNKNOWN';
+
     if (allText.includes('requires authentication') || allText.includes('protected')) {
       authExpectation = 'AUTH_EXPECTED';
     } else if (allText.includes('public endpoint') || allText.includes('unauthenticated')) {
@@ -51,7 +58,7 @@ export class SurfaceSemanticValidator {
       authExpectation: authExpectation,
       boundaryType: 'UNKNOWN',
       evidenceIds: surfaceEvidence.map(e => e.id),
-      confidence: 0.6,
+      confidence: 0.7,
       unknowns: authExpectation === 'AUTH_UNKNOWN' ? ['Actual authentication requirement'] : []
     };
   }

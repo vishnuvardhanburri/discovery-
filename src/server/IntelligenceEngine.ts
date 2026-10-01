@@ -105,7 +105,8 @@ export class IntelligenceEngine {
       })),
       evidenceList,
       [],
-      { onProgress: (s, m) => onProgress?.('signals', m) }
+      companyName,
+      { onProgress: (s: string, m: string) => onProgress?.('signals', m) }
     );
 
     const correlationResult = SignalCorrelationEngine.correlate(deepSignals, evidenceList);

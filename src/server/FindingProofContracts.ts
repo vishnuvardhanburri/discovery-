@@ -7,15 +7,6 @@
 
 import { SignalSourceType, SourceRelationship } from './IntelligenceCase';
 
-/**
- * XAVIRA — FINDING PROOF CONTRACTS
- * ─────────────────────────────────────────────────────────────────────────────
- * Defines the strict evidence requirements that must be satisfied for a
- * CandidateSignal to be promoted to a VerifiedFinding.
- */
-
-import { SignalSourceType, SourceRelationship } from './IntelligenceCase';
-
 export interface ProofContract {
   identity: {
     minimumRelationship: SourceRelationship;

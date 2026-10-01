@@ -8,9 +8,6 @@ import { ExposureGraph } from './ExternalExposureGraphEngine';
 import { SurfaceSemanticAssessment } from './SemanticTypes';
 
 export class OpportunityDecisionEngine {
-  /**
-   * Determines if the gathered intelligence represents a meaningful XAVIRA opportunity.
-   */
   async decide(
     org: any,
     evidenceStore: Evidence[],
@@ -24,83 +21,65 @@ export class OpportunityDecisionEngine {
     diagnosticFit: any
   ): Promise<OpportunityDecision> {
     
-    // Rule 1: VERIFIED_FINDING is absolute.
+    // Rule 1: VERIFIED_FINDING (The Diamond) - Must have evidence
     const verifiedFinding = hypotheses.find(h => h.status === 'VERIFIED');
-    if (verifiedFinding) {
+    if (verifiedFinding && verifiedFinding.evidenceIds.length > 0) {
       return {
         state: 'VERIFIED_FINDING',
         reason: `Verified finding: ${verifiedFinding.claim}`,
         supportingEvidenceIds: verifiedFinding.evidenceIds,
         decisionTimeline: new Date().toISOString(),
         confidence: 1.0,
-        commercialRelevance: 'HIGH - Verified technical failure/exposure'
+        commercialRelevance: 'HIGH'
       };
     }
 
-    // Rule 2: Check for ADVISORY_OPPORTUNITY
-    // Condition: Attributable evidence + relevant signal + bounded claim + advisory contract.
-    const advisoryCandidate = hypotheses.find(h => 
-      h.status === 'HYPOTHESIS' && 
-      h.confidence > 0.6 && 
-      this.isAdvisoryType(h)
-    );
+    // Rule 2: INVESTIGATION_OPPORTUNITY
+    // Now REQUIRES: (meaningful technical context OR evidence-supported signal OR reasonable hypothesis)
+    const hasMeaningfulComplexity = complexityMap && complexityMap.nodes && complexityMap.nodes.length > 0;
+    const hasStrongHypothesis = hypotheses.find(h => h.confidence > 0.5 && h.evidenceIds.length > 0);
+    const hasSupportedSignal = signals.length > 0 && evidenceStore.length > 0;
 
-    if (advisoryCandidate && this.isEvidenceAttributable(evidenceStore)) {
-      return {
-        state: 'ADVISORY_OPPORTUNITY',
-        reason: `Advisory opportunity based on: ${advisoryCandidate.claim}. Evidence is attributable but does not require live verification.`,
-        supportingEvidenceIds: advisoryCandidate.evidenceIds,
-        decisionTimeline: new Date().toISOString(),
-        confidence: 0.7,
-        commercialRelevance: 'MEDIUM - Technical transition or architecture signal'
-      };
-    }
-
-    // Rule 3: INVESTIGATION_OPPORTUNITY
-    // Condition: Real complexity + meaningful evidence + reasonable hypothesis.
-    if (complexityMap && complexityMap.nodes.length > 0 && hypotheses.length > 0) {
+    if (hasStrongHypothesis || (hasMeaningfulComplexity && hasSupportedSignal)) {
       return {
         state: 'INVESTIGATION_OPPORTUNITY',
-        reason: `Technical complexity identified (${complexityMap.nodes.length} nodes). Hypotheses generated but require further research to transition to verified/advisory state.`,
-        supportingEvidenceIds: hypotheses[0].evidenceIds,
+        reason: `Technical opportunity identified based on complexity and supported signals.`,
+        supportingEvidenceIds: hasStrongHypothesis ? hasStrongHypothesis.evidenceIds : evidenceStore.slice(0, 3).map(e => e.id),
+        decisionTimeline: new Date().toISOString(),
+        confidence: 0.6,
+        commercialRelevance: 'MEDIUM-HIGH'
+      };
+    }
+
+    // Rule 3: ADVISORY_OPPORTUNITY
+    const advisoryCandidate = hypotheses.find(h => this.isAdvisoryType(h) && h.evidenceIds.length > 0);
+    if (advisoryCandidate) {
+      return {
+        state: 'ADVISORY_OPPORTUNITY',
+        reason: `Advisory signal: ${advisoryCandidate.claim}`,
+        supportingEvidenceIds: advisoryCandidate.evidenceIds,
         decisionTimeline: new Date().toISOString(),
         confidence: 0.5,
-        commercialRelevance: 'TBD - Requires deeper investigation'
+        commercialRelevance: 'MEDIUM'
       };
     }
 
     // Rule 4: RESEARCH_MORE
-    // Condition: Missing critical evidence but likelihood of resolution is high.
-    if (hypotheses.length === 0 && evidenceStore.length > 0) {
+    // If we have surfaces or some evidence, but not enough for an opportunity
+    if (surfaceAssessments.length > 0 || evidenceStore.length > 0 || signals.length > 0) {
       return {
         state: 'RESEARCH_MORE',
-        reason: 'Initial signals detected but insufficient to form testable hypotheses.',
-        supportingEvidenceIds: evidenceStore.slice(0, 5).map(e => e.id),
-        missingEvidence: ['Specific architectural markers', 'Boundary behavioral proof'],
-        recommendedResearch: ['Deepen technical footprint search', 'Analyze recent engineering blog posts'],
+        reason: 'Technical footprint identified, but insufficient evidence for an opportunity decision.',
+        supportingEvidenceIds: evidenceStore.slice(0, 3).map(e => e.id),
         decisionTimeline: new Date().toISOString(),
         confidence: 0.3,
-        commercialRelevance: 'LOW - Preliminary stage'
+        commercialRelevance: 'LOW'
       };
     }
 
-    // Rule 5: MONITOR
-    // Condition: Signal is real, org is relevant, but no current problem.
-    if (signals.length > 0) {
-      return {
-        state: 'MONITOR',
-        reason: 'Signals are real but no current architectural pressure or exposure is evident. Monitoring for change.',
-        supportingEvidenceIds: [],
-        decisionTimeline: new Date().toISOString(),
-        confidence: 0.4,
-        commercialRelevance: 'LOW - Latent opportunity'
-      };
-    }
-
-    // Rule 6: NO_ACTIONABLE_SIGNAL / REJECT
     return {
       state: 'NO_ACTIONABLE_SIGNAL',
-      reason: 'Evidence exists but is not materially relevant to XAVIRA diagnostic scope.',
+      reason: 'No technical footprints or actionable signals detected.',
       supportingEvidenceIds: [],
       decisionTimeline: new Date().toISOString(),
       confidence: 0.9,
@@ -113,20 +92,9 @@ export class OpportunityDecisionEngine {
     return advisoryKeywords.some(k => h.claim.toLowerCase().includes(k));
   }
 
-  private isEvidenceAttributable(evidence: Evidence[]): boolean {
-    return evidence.some(e => e.provenance.provider !== 'UNKNOWN');
-  }
-
-  /**
-   * Synthesizes the Evidence Packet for downstream use.
-   */
-  async createEvidencePacket(
-    org: any,
-    decision: OpportunityDecision,
-    context: any
-  ): Promise<OpportunityEvidencePacket> {
+  async createEvidencePacket(org: any, decision: OpportunityDecision, context: any): Promise<OpportunityEvidencePacket> {
     return {
-      organization: org.companyName || org.name,
+      organization: org.organizationName || org.name,
       domain: org.domain,
       industryContext: org.industry || 'Unknown',
       keySignals: context.signals || [],
@@ -141,18 +109,17 @@ export class OpportunityDecisionEngine {
       uncertainties: context.unknowns || [],
       recommendedNextAction: this.mapDecisionToNextAction(decision.state),
       sourceUrls: context.sourceUrls || [],
-      provenance: 'XAVIRA Autonomous Intelligence Pipeline'
+      provenance: 'XAVIRA Intelligence Pipeline'
     };
   }
 
   private mapDecisionToNextAction(state: OpportunityDecisionState): string {
     switch(state) {
-      case 'VERIFIED_FINDING': return 'Proceed to high-priority outreach with verified evidence.';
-      case 'ADVISORY_OPPORTUNITY': return 'Prepare diagnostic advisory based on attributable signals.';
-      case 'INVESTIGATION_OPPORTUNITY': return 'Execute targeted deep-research phase.';
-      case 'MONITOR': return 'Add to monitoring queue for architectural changes.';
-      case 'RESEARCH_MORE': return 'Execute recommended research tasks to resolve uncertainty.';
-      default: return 'No further action required.';
+      case 'VERIFIED_FINDING': return 'Immediate high-priority outreach.';
+      case 'ADVISORY_OPPORTUNITY': return 'Prepare technical advisory.';
+      case 'INVESTIGATION_OPPORTUNITY': return 'Execute deep-research verification.';
+      case 'RESEARCH_MORE': return 'Deepen technical footprint search.';
+      default: return 'Monitor for changes.';
     }
   }
 }

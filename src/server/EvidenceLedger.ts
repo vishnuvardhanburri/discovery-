@@ -24,7 +24,7 @@ export interface EvidenceRecord extends Evidence {
   /** The research run that observed this evidence. */
   run_id: string;
   /** 6-tag provenance: GROWJO_SOURCE, OFFICIAL_COMPANY_SOURCE, etc. */
-  provenance: string;
+  provenance_tag: string;
   /** Downstream entities that reference this evidence. */
   referenced_by: string[];
   /** Source relationship in the IdentityGraph. */
@@ -92,7 +92,7 @@ export class EvidenceLedger {
     const record: EvidenceRecord = {
       id,
       evidence_origin: evidence.evidence_origin || 'REAL_PUBLIC_OBSERVATION',
-      provenance: provenance,
+      provenance_tag: provenance,
       public_url: evidence.public_url,
       source_type: (evidence.source_type || 'UNKNOWN') as any,
       method: evidence.method || 'GET',

@@ -112,7 +112,7 @@ const scenarios: Scenario[] = [
     domain: 'de-novo-solutions.com',
     description: 'DuckDuckGo search → evidence + sources from public search',
     providerData: null,
-    searchProvider: new PublicWebSearchProvider({ fetcher: boundedFetch as any, timeoutMs: 8000 }),
+    searchProvider: new PublicWebSearchProvider({ fetcher: boundedFetch as any }),
     skipLiveWeb: false,
   },
 ];

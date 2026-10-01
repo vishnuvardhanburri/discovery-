@@ -94,6 +94,8 @@ export type TemporalStatus = 'CURRENT' | 'RECENT' | 'HISTORICAL' | 'UNKNOWN_DATE
 
 export type EvidenceRelationship = 'SUPPORT' | 'CONTRADICT' | 'CORROBORATE' | 'NEUTRAL';
 
+export type SourceRelationship = 'UNVERIFIED' | 'VERIFIED_OWNED' | 'VERIFIED_EXTERNAL';
+
 export interface SignalCandidate {
   id: string;
   type: SignalType;
@@ -122,8 +124,8 @@ export type EvidenceType =
 
 export interface ScoreBreakdown {
   reliability: number;     // 0-100: Trust in the source
-  directness: number;      // 0-100: How directly it proves a claim
-  specificity: number;      // 0-100: Technical detail vs generic prose
+  directness: number;       // 0-100: How directly it proves a claim
+  specificity: number;     // 0-100: Technical detail vs generic prose
   freshness: number;       // 0-100: Recency of the observation
   relevance: number;       // 0-100: Alignment with the target persona/pain
   repeatability: number;   // 0-100: Can it be reproduced?
@@ -134,7 +136,7 @@ export interface ScoreBreakdown {
 export interface Evidence {
   id: string;
   company_id?: string;
-  provenance: Provenance;
+  provenance?: Provenance;
   evidence_origin: EvidenceOrigin;
   type?: EvidenceType;
   public_url: string;
@@ -190,6 +192,10 @@ export interface ProviderExecutionResult<T> {
   status: ProviderExecutionStatus;
   provider: string;
   observations: T[];
+  /** Backwards-compatible alias for `observations` when T is Evidence. */
+  evidence?: T[];
+  /** Number of discovery errors encountered. */
+  discovery_errors?: number;
   metadata?: {
     retryAfterMs?: number;
     requestsAttempted?: number;
@@ -197,9 +203,24 @@ export interface ProviderExecutionResult<T> {
   }
 }
 
+export interface ObservationOptions {
+  timeoutMs?: number;
+  headers?: Record<string, string>;
+  requiredOrigin?: string;
+  sampleCount?: number;
+}
+
 export interface ObservationResult {
   evidence: Evidence[];
   discovery_errors: number;
+  status?: ProviderExecutionStatus;
+  provider?: string;
+  observations?: Evidence[];
+  metadata?: {
+    retryAfterMs?: number;
+    requestsAttempted?: number;
+    sourceCount?: number;
+  };
 }
 
 export interface PublicObservationProvider {
@@ -296,6 +317,8 @@ export interface ResearchBudgetState {
   githubObservations: number;
   stoppedEarly: boolean;
   stopReason?: string;
+  pagesFetched?: number;
+  technicalSurfaces?: number;
 }
 
 export type InvestigationState =
@@ -320,32 +343,50 @@ export interface CompanyIntelligenceProfile {
     domain: string;
     whatTheyDo: string;
     industry?: string;
+    evidenceIds: string[];
   };
   product: {
     services: string[];
     technicalProduct: string;
     customerUseCases: string[];
+    evidenceIds: string[];
   };
   technologyFootprint: {
     languages: string[];
-    platforms: string[];
-    infrastructureClues: string[];
+    frameworks: string[];
+    cloud: string[];
+    databases: string[];
+    compute: string[];
+    orchestration: string[];
+    apis: string[];
+    evidenceIds: string[];
   };
   surfaces: {
     apiDeveloper: string[];
-    architectureEngineering: string[];
-    statusReliability: string[];
-    releasesChangelog: string[];
+    docs: string[];
+    engineering: string[];
+    status: string[];
+    changelog: string[];
+    repositories: string[];
+    architecture: string[];
+    evidenceIds: string[];
   };
   engineeringContext: {
-    hiringSignals: string[];
     articles: string[];
-    publicRepositories: string[];
+    migrations: string[];
+    launches: string[];
+    architectureChanges: string[];
+    scaling: string[];
+    recentChanges: string[];
+    evidenceIds: string[];
   };
   operationalSignals: {
     incidentHistory: string[];
-    infrastructureSignals: string[];
+    reliabilitySignals: string[];
+    /** Backwards-compatible alias for reliabilitySignals. */
+    infrastructureSignals?: string[];
     liveObservations: string[];
+    evidenceIds: string[];
   };
   unknowns: string[];
   researchGaps: string[];
@@ -436,11 +477,12 @@ export interface IntelligenceCase {
   human_review_required?: boolean;
   human_approval_status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'NOT_REQUIRED';
   human_review_audit?: any[];
-  
+
   intelligenceProfile?: CompanyIntelligenceProfile;
   complexityMap?: ComplexityMap;
   hypotheses?: InvestigationHypothesis[];
   internalState?: InvestigationState;
+  github_memory?: { repositories: Record<string, { activity_score?: number; last_seen?: string; commits?: number }> };
 }
 
 export type DiscoveryState = 'IDLE' | 'DISCOVERING' | 'FOUND_CANDIDATE' | 'NOT_FOUND';
@@ -479,14 +521,15 @@ export interface DiscoveredPage {
 }
 
 export type ProfessionalPageCategory =
-  | 'homepage'
-  | 'team_people'
-  | 'Engineering' | 'blog' | 'docs' | 'security' | 'status_ops' | 'about' | 'hiring' | 'other';
+  | 'homepage' | 'team_people'
+  | 'Engineering' | 'engineering'
+  | 'blog' | 'docs' | 'security' | 'status_ops' | 'about' | 'hiring' | 'other';
 
 export interface CompanySurface {
   company: string;
   origin: string;
-  company_homepage: string;
+  company_homepage?: string;
+  homepage?: string;
   discovered_pages: DiscoveredPage[];
   page_categories: Record<string, string[]>;
 }
@@ -509,4 +552,111 @@ export interface ProspectCandidate {
   verificationState: InvestigationState;
   diagnosticFit: string;
   provenance: string[];
+}
+
+/**
+ * Canonical factory for creating a fully initialized CompanyIntelligenceProfile.
+ * Ensures all array properties are initialized to prevent runtime TypeError during synthesis.
+ */
+export function createEmptyCompanyIntelligenceProfile(companyName: string, domain: string): CompanyIntelligenceProfile {
+  return {
+    identity: {
+      companyName,
+      domain,
+      whatTheyDo: 'Unknown',
+      industry: 'Unknown',
+      evidenceIds: []
+    },
+    product: {
+      services: [],
+      technicalProduct: 'Unknown',
+      customerUseCases: [],
+      evidenceIds: []
+    },
+    technologyFootprint: {
+      languages: [],
+      frameworks: [],
+      cloud: [],
+      databases: [],
+      compute: [],
+      orchestration: [],
+      apis: [],
+      evidenceIds: []
+    },
+    surfaces: {
+      apiDeveloper: [],
+      docs: [],
+      engineering: [],
+      status: [],
+      changelog: [],
+      repositories: [],
+      architecture: [],
+      evidenceIds: []
+    },
+    engineeringContext: {
+      articles: [],
+      migrations: [],
+      launches: [],
+      architectureChanges: [],
+      scaling: [],
+      recentChanges: [],
+      evidenceIds: []
+    },
+    operationalSignals: {
+      incidentHistory: [],
+      reliabilitySignals: [],
+      infrastructureSignals: [],
+      liveObservations: [],
+      evidenceIds: []
+    },
+    unknowns: [],
+    researchGaps: []
+  };
+}
+
+/**
+ * Runtime invariant check for CompanyIntelligenceProfile.
+ * Throws a descriptive error if any required array is missing.
+ */
+export function assertValidCompanyIntelligenceProfile(profile: CompanyIntelligenceProfile, company: string): void {
+  const requiredPaths: Record<string, any[]> = {
+    'identity.evidenceIds': profile.identity.evidenceIds,
+    'product.services': profile.product.services,
+    'product.evidenceIds': profile.product.evidenceIds,
+    'technologyFootprint.languages': profile.technologyFootprint.languages,
+    'technologyFootprint.frameworks': profile.technologyFootprint.frameworks,
+    'technologyFootprint.cloud': profile.technologyFootprint.cloud,
+    'technologyFootprint.databases': profile.technologyFootprint.databases,
+    'technologyFootprint.compute': profile.technologyFootprint.compute,
+    'technologyFootprint.orchestration': profile.technologyFootprint.orchestration,
+    'technologyFootprint.apis': profile.technologyFootprint.apis,
+    'technologyFootprint.evidenceIds': profile.technologyFootprint.evidenceIds,
+    'surfaces.apiDeveloper': profile.surfaces.apiDeveloper,
+    'surfaces.docs': profile.surfaces.docs,
+    'surfaces.engineering': profile.surfaces.engineering,
+    'surfaces.status': profile.surfaces.status,
+    'surfaces.changelog': profile.surfaces.changelog,
+    'surfaces.repositories': profile.surfaces.repositories,
+    'surfaces.architecture': profile.surfaces.architecture,
+    'surfaces.evidenceIds': profile.surfaces.evidenceIds,
+    'engineeringContext.articles': profile.engineeringContext.articles,
+    'engineeringContext.migrations': profile.engineeringContext.migrations,
+    'engineeringContext.launches': profile.engineeringContext.launches,
+    'engineeringContext.architectureChanges': profile.engineeringContext.architectureChanges,
+    'engineeringContext.scaling': profile.engineeringContext.scaling,
+    'engineeringContext.recentChanges': profile.engineeringContext.recentChanges,
+    'engineeringContext.evidenceIds': profile.engineeringContext.evidenceIds,
+    'operationalSignals.incidentHistory': profile.operationalSignals.incidentHistory,
+    'operationalSignals.infrastructureSignals': profile.operationalSignals.infrastructureSignals || [],
+    'operationalSignals.liveObservations': profile.operationalSignals.liveObservations,
+    'operationalSignals.evidenceIds': profile.operationalSignals.evidenceIds,
+    'unknowns': profile.unknowns,
+    'researchGaps': profile.researchGaps,
+  };
+
+  for (const [path, value] of Object.entries(requiredPaths)) {
+    if (!Array.isArray(value)) {
+      throw new Error(`[ProfileInvariantViolation] Company: ${company} | Missing Property: ${path} | Expected: Array | Stage: Synthesis`);
+    }
+  }
 }

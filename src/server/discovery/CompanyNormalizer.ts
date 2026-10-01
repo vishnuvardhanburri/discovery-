@@ -1,11 +1,13 @@
-import { OrganizationCandidate } from './AutonomousOrganizationDiscoveryEngine';
-
 export class CompanyNormalizer {
-  normalize(candidate: OrganizationCandidate): OrganizationCandidate {
+  async normalize(candidate: any): Promise<{ candidate: any, confirmed: boolean }> {
+    // Simplified footprint confirmation logic
+    // In production, this would check for official domain existence, etc.
+    const hasDomain = !!candidate.domain;
+    const hasSource = !!candidate.sourceUrl;
+
     return {
-      ...candidate,
-      domain: candidate.domain ? candidate.domain.toLowerCase() : undefined,
-      organizationName: candidate.organizationName.trim()
+      candidate: candidate,
+      confirmed: hasDomain && hasSource
     };
   }
 }

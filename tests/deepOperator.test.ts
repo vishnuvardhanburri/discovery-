@@ -272,7 +272,7 @@ async function main() {
       ['https://acme.com/status', STATUS_HTML],
       ['https://acme.com/blog', BLOG_HTML]
     ]);
-    const signals = DeepSignalExtractor.extract(pages, html, [], { onProgress: () => {} });
+    const signals = DeepSignalExtractor.extract(pages, html, [], 'test', { onProgress: () => {} });
     assert(signals.length >= 3, `signals extracted (got ${signals.length})`);
     assert(signals.some(s => s.type === 'ARCHITECTURE_DISCUSSION'), 'architecture signal present');
     assert(signals.some(s => s.type === 'TECHNICAL_HIRING'), 'technical hiring signal present');
@@ -344,7 +344,7 @@ async function main() {
       [{ url: 'https://acme.com/engineering', path: '/engineering', category: 'engineering' },
        { url: 'https://acme.com/status', path: '/status', category: 'status_ops' }],
       new Map([['https://acme.com/engineering', ENG_HTML], ['https://acme.com/status', STATUS_HTML]]),
-      goEvidence, { onProgress: () => {} }
+      goEvidence, 'test', { onProgress: () => {} }
     );
     const surface: CompanySurface = {
       company: 'acme', origin: 'https://acme.com', homepage: 'https://acme.com',
@@ -369,7 +369,7 @@ async function main() {
   await runTest('ICP qualification — RESEARCH_MORE when a gate is missing', () => {
     const signals = DeepSignalExtractor.extract(
       [{ url: 'https://acme.com/engineering', path: '/engineering', category: 'engineering' }],
-      new Map([['https://acme.com/engineering', ENG_HTML]]), [], { onProgress: () => {} }
+      new Map([['https://acme.com/engineering', ENG_HTML]]), [], 'test', { onProgress: () => {} }
     );
     const surface: CompanySurface = {
       company: 'acme', origin: 'https://acme.com', homepage: 'https://acme.com',

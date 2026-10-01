@@ -141,7 +141,7 @@ export class PublicSourceGraph {
     return new PublicSourceGraph({
       company: surface.company,
       origin: surface.origin,
-      homepage: surface.homepage,
+      homepage: surface.homepage || surface.company_homepage || "",
       discovered_pages: surface.discovered_pages,
       sameAs: opts.sameAs,
     });

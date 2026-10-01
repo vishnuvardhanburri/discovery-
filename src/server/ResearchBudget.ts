@@ -14,6 +14,18 @@ function bs(cs?: IntelligenceCase): ResearchBudgetState {
 
 export type BudgetMetric = 'REQUEST' | 'QUERY' | 'PAGE' | 'SURFACE';
 
+/** Research stages used by LiveWebResearchProvider staging logic. */
+export type ResearchStage = 1 | 2 | 3 | 4 | 5 | 6;
+
+export interface StageConfig {
+  stage: ResearchStage;
+  name: string;
+  maxRequests: number;
+  maxQueries: number;
+  maxGitHubObservations: number;
+  description: string;
+}
+
 export interface AbsoluteCompanyBudget {
   maxSearchQueries: number;      // e.g., 15
   maxPagesFetched: number;       // e.g., 50
@@ -39,6 +51,7 @@ export interface BudgetSummary {
   pages_remaining: number;
   stopped_early: boolean;
   stop_reason?: string;
+  stageName?: string;
 }
 
 export interface StopReason {
@@ -92,6 +105,50 @@ export class ResearchBudget {
     return this._isStopped;
   }
 
+  /** Current research stage number (for LiveWebResearchProvider staging). */
+  private _currentStage: ResearchStage = 1;
+
+  /** Check if a research stage should be attempted (not stopped early, not past max stage). */
+  shouldAttemptStage(stage: ResearchStage, caseState?: IntelligenceCase): boolean {
+    if (!caseState) {
+      if (this._isStopped) return false;
+      if (stage === 1) return true;
+      return stage <= (this._currentStage as number) + 1;
+    }
+    const state = bs(caseState);
+    if (state.stoppedEarly) return false;
+    if (stage === 1) return true;
+    const cfg = this.getStageConfig(stage);
+    if (!cfg) return false;
+    if (state.requestsUsed >= DEFAULT_COMPANY_BUDGET.maxTotalRequests) return false;
+    return true;
+  }
+
+  /** Stage configurations for research pipeline. */
+  public static readonly STAGES: StageConfig[] = [
+    { stage: 1, name: 'dataset-qualification', maxRequests: 0, maxQueries: 0, maxGitHubObservations: 0, description: 'Cheap dataset qualification.' },
+    { stage: 2, name: 'public-source-discovery', maxRequests: 8, maxQueries: 3, maxGitHubObservations: 2, description: 'Cheap public source discovery (homepage, sitemap, links).' },
+    { stage: 3, name: 'live-technical-research', maxRequests: 12, maxQueries: 8, maxGitHubObservations: 5, description: 'Live technical research via search + direct observation.' },
+    { stage: 4, name: 'signal-correlation', maxRequests: 6, maxQueries: 5, maxGitHubObservations: 3, description: 'Deeper signal correlation and evidence gathering.' },
+    { stage: 5, name: 'safe-verification', maxRequests: 5, maxQueries: 3, maxGitHubObservations: 2, description: 'Safe read-only verification of technical signals.' },
+    { stage: 6, name: 'owner-contact-refresh', maxRequests: 4, maxQueries: 3, maxGitHubObservations: 1, description: 'Owner and contact refresh via public sources.' },
+  ];
+
+  /** Get the configuration for a research stage. */
+  getStageConfig(stage: ResearchStage): StageConfig | undefined {
+    return ResearchBudget.STAGES.find(s => s.stage === stage);
+  }
+
+  /** Advance to the next research stage. */
+  advanceStage(): void {
+    this._currentStage = Math.min(6, (this._currentStage as number) + 1) as ResearchStage;
+  }
+
+  /** Get the current stage number. */
+  getCurrentStageNum(): ResearchStage {
+    return this._currentStage;
+  }
+
   /**
    * Case-integrated stop check.
    */
@@ -114,8 +171,8 @@ export class ResearchBudget {
         if (caseState) state.queriesUsed++; else this._queriesUsed++;
         break;
       case 'PAGE':
-        if (state.pagesFetched >= budget.maxPagesFetched) return false;
-        if (caseState) state.pagesFetched++; else this._pagesFetched++;
+        if ((state.pagesFetched || 0) >= budget.maxPagesFetched) return false;
+        if (caseState) state.pagesFetched = (state.pagesFetched || 0) + 1; else this._pagesFetched++;
         break;
       case 'REQUEST':
         if (state.requestsUsed >= budget.maxTotalRequests) return false;
@@ -139,8 +196,8 @@ export class ResearchBudget {
         }
         break;
       case 'SURFACE':
-        if (state.technicalSurfaces >= budget.maxTechnicalSurfaces) return false;
-        if (caseState) state.technicalSurfaces++; else this._technicalSurfaces++;
+        if ((state.technicalSurfaces || 0) >= budget.maxTechnicalSurfaces) return false;
+        if (caseState) state.technicalSurfaces = (state.technicalSurfaces || 0) + 1; else this._technicalSurfaces++;
         break;
     }
     return true;
@@ -171,18 +228,20 @@ export class ResearchBudget {
   }
 
   /** Get a summary of the budget usage. */
-  getSummary(caseState?: IntelligenceCase): BudgetSummary {
-    const state = bs(caseState);
+  getSummary(stage: ResearchStage = 2): BudgetSummary {
+    const cfg = this.getStageConfig(stage) ?? this.getStageConfig(2)!;
+    const state = bs();
     const budget = DEFAULT_COMPANY_BUDGET;
     return {
       requests_used: state.requestsUsed,
       requests_remaining: Math.max(0, budget.maxTotalRequests - state.requestsUsed),
       queries_used: state.queriesUsed,
       queries_remaining: Math.max(0, budget.maxSearchQueries - state.queriesUsed),
-      pages_fetched: state.pagesFetched,
-      pages_remaining: Math.max(0, budget.maxPagesFetched - state.pagesFetched),
+      pages_fetched: state.pagesFetched || 0,
+      pages_remaining: Math.max(0, budget.maxPagesFetched - (state.pagesFetched || 0)),
       stopped_early: state.stoppedEarly,
       stop_reason: state.stopReason,
+      stageName: cfg.name,
     };
   }
 }

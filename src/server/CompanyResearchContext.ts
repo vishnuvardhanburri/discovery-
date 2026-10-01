@@ -27,7 +27,7 @@ export class CompanyResearchContext {
         this.budget.requestsUsed++;
         
         // Implement basic fallback/retry logic
-        let response;
+        let response: Response | undefined;
         let attempts = 0;
         const maxAttempts = 2;
 
@@ -55,7 +55,7 @@ export class CompanyResearchContext {
           }
         }
 
-        return response;
+        return response!;
       } finally {
         this.inFlight.delete(requestKey);
       }

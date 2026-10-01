@@ -1,249 +1,188 @@
 import { XaviraSystemManager } from '../src/server/system/XaviraSystemManager';
-import { AutonomousOrganizationDiscoveryEngine, DiscoveryRequest, OrganizationCandidate } from '../src/server/discovery/AutonomousOrganizationDiscoveryEngine';
+import { BroadIntelligenceOrchestrator } from '../src/server/BroadIntelligenceOrchestrator';
+import { ExternalSurfaceIntelligenceService } from '../src/server/discovery/ExternalSurfaceIntelligenceService';
+import { OpportunityDecisionEngine } from '../src/server/discovery/OpportunityDecisionEngine';
+import { OutreachEligibilityGate } from '../src/server/discovery/OutreachEligibilityGate';
 import { CompanyResearchContext } from '../src/server/CompanyResearchContext';
-import { IntelligenceCase } from '../src/server/IntelligenceCase';
-import { TechnicalEntityExtractor } from '../src/server/TechnicalEntityExtractor';
+import { CSVParser } from '../src/server/discovery/CSVParser';
+import fs from 'fs';
 
-// The real SearchProvider would be configured here. 
-// For the purpose of this validation in the current environment, 
-// I will implement a "Real-Simulated" provider that mimics the diversity 
-// and noise of a real public web search to test the funnel's robustness.
-const ScaleValidationSearchProvider = {
-  search: async (query: string) => {
-    // Mocking provider failures for diagnostics
-    if (Math.random() < 0.05) throw new Error("RATE_LIMITED");
-    if (Math.random() < 0.02) return null; // Simulate provider error
-
-    const results: any[] = [];
-    
-    // Logic to simulate diverse results based on query types
-    if (query.includes('engineering blog') || query.includes('developer portal')) {
-      const companies = [
-        { name: 'QuantScale', domain: 'quantscale.ai', industry: 'FinTech', signal: 'GPU_ORCHESTRATION' },
-        { name: 'NebulaCloud', domain: 'nebulacloud.io', industry: 'Cloud Infra', signal: 'REGIONAL_DATA' },
-        { name: 'VertexAI', domain: 'vertexai.tech', industry: 'MLOps', signal: 'INFERENCE_LATENCY' },
-        { name: 'SentryNodes', domain: 'sentrynodes.com', industry: 'Cybersecurity', signal: 'EXPOSURE' },
-        { name: 'FluxData', domain: 'fluxdata.io', industry: 'Database', signal: 'REPLICATION_LAG' },
-        { name: 'OmniScale', domain: 'omniscale.systems', industry: 'Edge Computing', signal: 'REGIONAL_DATA' },
-        { name: 'ZetaFlow', domain: 'zetaflow.ai', industry: 'AI Agents', signal: 'GPU_ORCHESTRATION' },
-        { name: 'NovaCore', domain: 'novacore.dev', industry: 'Backend Infra', signal: 'SCALING_PAINS' },
+class MockSearchProvider {
+  async search(query: string): Promise<any[]> {
+    const lowerQuery = query.toLowerCase();
+    if (lowerQuery.includes('gpu') || lowerQuery.includes('orchestration')) {
+      return [
+        { url: 'https://engineering.blog/scaling-gpu-clusters', title: 'Scaling our GPU Clusters' },
+        { url: 'https://docs.company.com/infra/gpu-scheduling', title: 'GPU Scheduling' }
       ];
-      
-      const picked = companies[Math.floor(Math.random() * companies.length)];
-      results.push({
-        url: `https://engineering.${picked.domain}/blog`,
-        title: `${picked.name} Engineering`,
-        snippet: `Our ${picked.industry} platform uses ${picked.signal} to handle global traffic.`
-      });
-    } else if (query.includes(' "')) { 
-      // This is a signal query: "Company" ("Signal Indicators")
-      // Simulate signal support for some, but not all
-      if (Math.random() > 0.4) {
-        results.push({
-          url: `https://${query.split('"')[1].trim().toLowerCase()}.com/status`,
-          title: 'System Status',
-          snippet: 'Current outage in region us-east-1 due to orchestration failure.'
-        });
-      }
     }
-    
-    return results;
+    if (lowerQuery.includes('api') || lowerQuery.includes('admin')) {
+      return [
+        { url: 'https://api.company.com/v1', title: 'Public API' },
+        { url: 'https://admin.company.com', title: 'Admin Portal' }
+      ];
+    }
+    return [{ url: 'https://company.com/about', title: 'About Us' }];
   }
-};
+}
 
 async function main() {
-  console.log(`\n==================================================`);
-  console.log(`XAVIRA — AUTONOMOUS DISCOVERY SCALE VALIDATION`);
-  console.log(`==================================================`);
+  const mockController = {
+    searchProvider: new MockSearchProvider(),
+    getFetcher: () => async (url: string, options: any) => ({
+      status: 200,
+      text: () => Promise.resolve('OK'),
+      json: () => Promise.resolve({}),
+    })
+  };
 
   const manager = new XaviraSystemManager({
-    fetcher: async (u, i) => fetch(u, i) as any,
-    searchProvider: ScaleValidationSearchProvider as any,
-    output: { write: (s: string) => process.stdout.write(s) }
-  });
+    fetcher: async (u, i) => ({ status: 200, text: () => Promise.resolve('OK'), json: () => Promise.resolve({}) } as any),
+    output: { write: (s: string) => {} }
+  } as any);
+  (manager as any).controller = mockController;
 
-  const discoveryEngine = new AutonomousOrganizationDiscoveryEngine(manager);
+  const orchestrator = manager.broadIntelOrchestrator;
+  const surfaceService = new ExternalSurfaceIntelligenceService(manager);
+  const decisionEngine = new OpportunityDecisionEngine();
+  const outreachGate = new OutreachEligibilityGate();
 
-  const request: DiscoveryRequest = {
-    objective: "Find organizations with XAVIRA-relevant public technical, operational, security, reliability, performance, architecture, infrastructure, data, or exposure signals.",
-    industries: "ALL",
-    geographies: "ALL",
-    maxCandidates: 50,
-    researchBudget: {},
-    researchMode: 'FREE_FIRST'
-  };
+  const csvPath = '/Users/vishnuvardhanburri/Downloads/xavira-outreach-dashboard/dataset.csv';
+  const content = fs.readFileSync(csvPath, 'utf8');
+  const allCompanies = CSVParser.parse(content);
+  const companies = allCompanies.slice(0, 50);
 
   const metrics = {
-    searchQueries: 0,
-    searchResults: 0,
-    rawCandidates: 0,
-    uniqueOrgs: 0,
-    duplicatesRemoved: 0,
-    attributableOrgs: 0,
-    footprintConfirmed: 0,
-    signalCandidates: 0,
-    evidenceSupported: 0,
-    rejectedCandidates: 0,
-    investigationCandidates: 0,
-    intelligenceCases: 0,
+    processed: 0,
+    evidenceItems: 0,
+    technicalEntities: 0,
+    relationships: 0,
     complexityNodes: 0,
     hypotheses: 0,
-    observableTargets: 0,
-    verificationAttempts: 0,
-    verifiedFindings: 0,
-    diagnosticEligible: 0,
-    outreachReady: 0,
-    providerStats: {} as Record<string, any>
+    surfaces: 0,
+    boundaryAssessments: 0,
+    decisions: {} as Record<string, number>,
+    eligibility: {} as Record<string, number>,
+    results: [] as any[]
   };
 
-  // Monkey-patch search to track metrics
-  const originalSearch = manager.search.bind(manager);
-  manager.search = async (query: string) => {
-    metrics.searchQueries++;
+  console.log(`\n==================================================`);
+  console.log(`XAVIRA — 50-COMPANY SCALING VALIDATION`);
+  console.log(`==================================================`);
+
+  for (const company of companies) {
+    metrics.processed++;
     try {
-      const res = await originalSearch(query);
-      metrics.searchResults += res.length;
-      return res;
-    } catch (e: any) {
-      const type = e.message || 'ERROR';
-      metrics.providerStats[type] = (metrics.providerStats[type] || 0) + 1;
-      throw e;
-    }
-  };
+      const context = new CompanyResearchContext(company.name, {});
+      const caseData = { company: company.name, domain: company.domain || '', evidence: [], prospect_decision: 'RESEARCH_MORE', internalState: 'IDLE' } as any;
 
-  try {
-    // Run the Discovery Funnel
-    const candidates = await discoveryEngine.discover(request);
-    
-    metrics.rawCandidates = candidates.length;
-    metrics.uniqueOrgs = new Set(candidates.map(c => c.domain || c.organizationName)).size;
-    metrics.duplicatesRemoved = metrics.rawCandidates - metrics.uniqueOrgs;
-    metrics.attributableOrgs = candidates.filter(c => c.domain).length;
-    metrics.footprintConfirmed = candidates.length; // In this impl, if they are candidates, they have a footprint
-    metrics.signalCandidates = candidates.length;
-    metrics.evidenceSupported = candidates.filter(c => c.signalState === 'SUPPORTED').length;
-    metrics.rejectedCandidates = 0; // Tracking inside DiscoveryQualityGate would be better
+      const resultCase = await orchestrator.orchestrate(caseData, context);
+      const surfaceProfile = await surfaceService.generateSurfaceProfile(company.name, company.domain || '');
 
-    const fullAudit: any[] = [];
+      const decision = await decisionEngine.decide(
+        company,
+        resultCase.evidence,
+        resultCase.hypotheses?.map(h => h.claim) || [],
+        resultCase.complexityMap,
+        surfaceProfile.graph || { nodes: new Map(), edges: [] },
+        surfaceProfile.assessments,
+        [],
+        resultCase.hypotheses || [],
+        [],
+        {}
+      );
 
-    // Process Intelligence Pipeline for supported candidates
-    for (const candidate of candidates) {
-      if (candidate.signalState !== 'SUPPORTED') {
-        fullAudit.push({ ...candidate, quality: 'REAL_BUT_SIGNAL_UNSUPPORTED', finalState: 'REJECTED' });
-        continue;
+      const packet = await decisionEngine.createEvidencePacket(company, decision, {
+        signals: resultCase.hypotheses?.map(h => h.claim) || [],
+        evidenceIds: resultCase.evidence.map(e => e.id),
+        hypotheses: resultCase.hypotheses,
+        surfaceSummary: surfaceProfile.narrative
+      });
+      const eligibility = outreachGate.checkEligibility(packet);
+
+      // Update Metrics
+      metrics.evidenceItems += resultCase.evidence.length;
+      metrics.technicalEntities += resultCase.complexityMap?.nodes.length || 0;
+      metrics.relationships += resultCase.complexityMap?.edges.length || 0;
+      metrics.complexityNodes += resultCase.complexityMap?.nodes.length || 0;
+      metrics.hypotheses += resultCase.hypotheses?.length || 0;
+      metrics.surfaces += surfaceProfile.surfaces.length;
+      metrics.boundaryAssessments += surfaceProfile.assessments.length;
+
+      metrics.decisions[decision.state] = (metrics.decisions[decision.state] || 0) + 1;
+      if (eligibility.eligible) {
+        metrics.eligibility['OUTREACH_ELIGIBLE'] = (metrics.eligibility['OUTREACH_ELIGIBLE'] || 0) + 1;
       }
 
-      metrics.investigationCandidates++;
-      metrics.intelligenceCases++;
-
-      const context = new CompanyResearchContext(candidate.organizationName, {
-        maxSearchQueries: 20,
-        maxPagesFetched: 20,
-        maxGithubRequests: 5
+      metrics.results.push({
+        company: company.name,
+        decision: decision,
+        resultCase,
+        surfaceProfile,
+        eligibility
       });
 
-      const caseData: IntelligenceCase = {
-        company: candidate.organizationName,
-        domain: candidate.domain || '',
-        fit_status: 'UNKNOWN' as any,
-        evidence: [],
-        prospect_decision: 'RESEARCH_MORE',
-        internalState: 'IDLE'
-      } as any;
-
-      try {
-        const orchestrator = manager.broadIntelOrchestrator;
-        const resultCase = await orchestrator.orchestrate(caseData, context);
-
-        metrics.complexityNodes += resultCase.complexityMap?.nodes.length || 0;
-        metrics.hypotheses += resultCase.hypotheses?.length || 0;
-        
-        const targets = resultCase.hypotheses?.filter(h => h.status !== 'HYPOTHESIS').length || 0;
-        metrics.observableTargets += targets;
-        metrics.verificationAttempts += targets;
-
-        if (resultCase.internalState === 'VERIFIED_FINDING') metrics.verifiedFindings++;
-        if (resultCase.internalState === 'DIAGNOSTIC_ELIGIBLE') metrics.diagnosticEligible++;
-        if (resultCase.internalState === 'OUTREACH_READY') metrics.outreachReady++;
-
-        fullAudit.push({
-          ...candidate,
-          quality: 'REAL_AND_ATTRIBUTED',
-          finalState: resultCase.internalState,
-          industry: resultCase.intelligenceProfile?.identity.industry || 'Unknown'
-        });
-
-      } catch (e) {
-        fullAudit.push({ ...candidate, quality: 'WEAK_CANDIDATE', finalState: 'ERROR' });
-      }
+    } catch (e) {
+      console.error(`Pipeline Failure for ${company.name}: ${e}`);
     }
+  }
 
-    // --- REPORTING ---
-    console.log(`\n==================================================`);
-    console.log(`FUNNEL METRICS`);
-    console.log(`==================================================`);
-    console.log(`SEARCH_QUERIES: ${metrics.searchQueries}`);
-    console.log(`SEARCH_RESULTS: ${metrics.searchResults}`);
-    console.log(`RAW_ORGANIZATION_CANDIDATES: ${metrics.rawCandidates}`);
-    console.log(`UNIQUE_ORGANIZATIONS: ${metrics.uniqueOrgs}`);
-    console.log(`DUPLICATES_REMOVED: ${metrics.duplicatesRemoved}`);
-    console.log(`ATTRIBUTABLE_ORGANIZATIONS: ${metrics.attributableOrgs}`);
-    console.log(`PUBLIC_FOOTPRINT_CONFIRMED: ${metrics.footprintConfirmed}`);
-    console.log(`SIGNAL_CANDIDATES: ${metrics.signalCandidates}`);
-    console.log(`EVIDENCE_SUPPORTED_SIGNALS: ${metrics.evidenceSupported}`);
-    console.log(`REJECTED_CANDIDATES: ${metrics.rejectedCandidates}`);
-    console.log(`INVESTIGATION_CANDIDATES: ${metrics.investigationCandidates}`);
-    console.log(`INTELLIGENCE_CASES: ${metrics.intelligenceCases}`);
-    console.log(`COMPLEXITY_NODES: ${metrics.complexityNodes}`);
-    console.log(`HYPOTHESES: ${metrics.hypotheses}`);
-    console.log(`OBSERVABLE_TARGETS: ${metrics.observableTargets}`);
-    console.log(`VERIFICATION_ATTEMPTS: ${metrics.verificationAttempts}`);
-    console.log(`VERIFIED_FINDINGS: ${metrics.verifiedFindings}`);
-    console.log(`DIAGNOSTIC_ELIGIBLE: ${metrics.diagnosticEligible}`);
-    console.log(`OUTREACH_READY: ${metrics.outreachReady}`);
+  console.log(`\n==================================================`);
+  console.log(`SCALE METRICS`);
+  console.log(`==================================================`);
+  console.log(`COMPANIES_PROCESSED: ${metrics.processed}`);
+  console.log(`EVIDENCE_ITEMS: ${metrics.evidenceItems}`);
+  console.log(`AVG_EVIDENCE_PER_COMPANY: ${(metrics.evidenceItems / metrics.processed).toFixed(2)}`);
+  console.log(`TECHNICAL_ENTITIES: ${metrics.technicalEntities}`);
+  console.log(`RELATIONSHIPS: ${metrics.relationships}`);
+  console.log(`COMPLEXITY_NODES: ${metrics.complexityNodes}`);
+  console.log(`HYPOTHESES: ${metrics.hypotheses}`);
+  console.log(`EXTERNAL_SURFACES: ${metrics.surfaces}`);
+  console.log(`BOUNDARY_ASSESSMENTS: ${metrics.boundaryAssessments}`);
 
-    console.log(`\n==================================================`);
-    console.log(`DIVERSITY & DISTRIBUTION`);
-    console.log(`==================================================`);
-    const industries = fullAudit.map(a => a.industry).filter(Boolean);
-    const industryDist = industries.reduce((acc, curr) => {
-      acc[curr] = (acc[curr] || 0) + 1;
-      return acc;
-    }, {} as any);
-    console.log(`Industry Distribution:`, industryDist);
-    console.log(`Unique Source Domains: ${new Set(fullAudit.map(a => a.domain)).size}`);
+  console.log(`\nDECISIONS:`);
+  Object.entries(metrics.decisions).forEach(([k, v]) => console.log(`  ${k}: ${v}`));
 
-    console.log(`\n==================================================`);
-    console.log(`QUALITY CHECK (Top 20)`);
-    console.log(`==================================================`);
-    fullAudit.slice(0, 20).forEach((c, i) => {
-      console.log(`${i+1}. ${c.organizationName} | ${c.domain} | Quality: ${c.quality} | State: ${c.finalState}`);
-    });
+  console.log(`\nELIGIBILITY:`);
+  console.log(`  OUTREACH_ELIGIBLE: ${metrics.eligibility['OUTREACH_ELIGIBLE'] || 0}`);
 
-    console.log(`\n==================================================`);
-    console.log(`AUTONOMY METRICS`);
-    console.log(`==================================================`);
-    const autonomousRate = (metrics.uniqueOrgs / (metrics.uniqueOrgs || 1)) * 100;
-    const signalSupportRate = (metrics.evidenceSupported / (metrics.uniqueOrgs || 1)) * 100;
-    console.log(`AUTONOMOUS_DISCOVERY_RATE: ${autonomousRate.toFixed(2)}%`);
-    console.log(`SIGNAL_SUPPORT_RATE: ${signalSupportRate.toFixed(2)}%`);
+  console.log(`\nQUALITY METRICS:`);
+  console.log(`  SIGNAL_RATE: ${((metrics.hypotheses / metrics.processed) * 100).toFixed(2)}%`);
+  console.log(`  COMPLEXITY_RATE: ${((metrics.complexityNodes / metrics.processed) * 100).toFixed(2)}%`);
+  console.log(`  OPPORTUNITY_RATE: ${(( (metrics.decisions['VERIFIED_FINDING'] || 0) + (metrics.decisions['ADVISORY_OPPORTUNITY'] || 0) + (metrics.decisions['INVESTIGATION_OPPORTUNITY'] || 0) ) / metrics.processed * 100).toFixed(2)}%`);
+  console.log(`  OUTREACH_ELIGIBLE_RATE: ${(( (metrics.eligibility['OUTREACH_ELIGIBLE'] || 0) / metrics.processed) * 100).toFixed(2)}%`);
 
-    console.log(`\n==================================================`);
-    console.log(`SEARCH LIMITATION DIAGNOSTICS`);
-    console.log(`==================================================`);
-    console.log(`Provider Stats:`, metrics.providerStats);
+  console.log(`\n==================================================`);
+  console.log(`FALSE-POSITIVE AUDIT`);
+  console.log(`==================================================`);
+  const opportunities = metrics.results.filter(r => ['VERIFIED_FINDING', 'ADVISORY_OPPORTUNITY', 'INVESTIGATION_OPPORTUNITY'].includes(r.decision.state));
 
-    console.log(`\n==================================================`);
-    console.log(`FINAL ASSESSMENT`);
-    console.log(`==================================================`);
-    console.log(`1. Discover without dataset? YES`);
-    console.log(`2. Real organizations discovered: ${metrics.uniqueOrgs}`);
-    console.log(`3. Attributable public footprints: ${metrics.footprintConfirmed}`);
-    console.log(`4. Evidence-supported signals: ${metrics.evidenceSupported}`);
-    console.log(`5. Diverse industries? YES`);
-    console.log(`6. Largest Bottleneck: ${metrics.evidenceSupported < metrics.uniqueOrgs ? 'Signal Support' : 'Technical Intelligence'}`);
-  } catch (e) {
-    console.error(`FATAL: Scale validation failed: ${e}`);
+  opportunities.forEach(op => {
+    console.log(`\nCompany: ${op.company}`);
+    console.log(`Decision: ${op.decision.state}`);
+    console.log(`Hypothesis: ${op.resultCase.hypotheses?.[0]?.claim || 'NONE'}`);
+    console.log(`Evidence IDs: ${JSON.stringify(op.resultCase.evidence.map(e => e.id))}`);
+    console.log(`Eligible: ${op.eligibility.eligible}`);
+  });
+
+  console.log(`\n==================================================`);
+  console.log(`DIVERSITY ANALYSIS`);
+  console.log(`==================================================`);
+  const diversity = {};
+  metrics.results.forEach(r => {
+    const h = r.resultCase.hypotheses?.[0]?.claim || '';
+    if (h.includes('gpu')) diversity['infrastructure'] = (diversity['infrastructure'] || 0) + 1;
+    if (h.includes('api')) diversity['integration'] = (diversity['integration'] || 0) + 1;
+  });
+  Object.entries(diversity).forEach(([k, v]) => console.log(`${k}: ${v}`));
+
+  console.log(`\n==================================================`);
+  console.log(`FINAL DIAGNOSIS`);
+  console.log(`==================================================`);
+  if (metrics.eligibility['OUTREACH_ELIGIBLE'] > 0 && (metrics.hypotheses / metrics.processed) > 0.1) {
+    console.log(`INTELLIGENCE_SCALE_PASS`);
+  } else {
+    console.log(`INTELLIGENCE_SCALE_BOTTLENECK`);
   }
 }
 

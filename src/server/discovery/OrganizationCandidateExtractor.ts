@@ -1,46 +1,57 @@
-import { OrganizationCandidate } from './AutonomousOrganizationDiscoveryEngine';
+export interface OrganizationCandidate {
+  organizationName: string;
+  domain?: string;
+  sourceUrl: string;
+  sourceType: string;
+  discoveryQuery: string;
+  discoveryReason: string;
+  provenance: string;
+}
 
 export class OrganizationCandidateExtractor {
   async extractCandidates(result: any): Promise<OrganizationCandidate[]> {
+    // Handle both raw arrays and SearchProviderResponse wrappers
+    const results = Array.isArray(result) ? result : (result?.results || []);
     const candidates: OrganizationCandidate[] = [];
-    const text = (result.snippet || '').toLowerCase();
-    const url = result.url;
 
-    if (!url) return [];
+    for (const res of results) {
+      const text = (res.snippet || '').toLowerCase();
+      const url = res.url;
 
-    try {
-      const domain = new URL(url).hostname.replace('www.', '');
-      
-      // During broad discovery, any company publishing a technical footprint 
-      // (engineering blog, docs, etc.) is a candidate.
-      if (this.isTechnicalFootprint(text, url)) {
-        candidates.push({
-          organizationName: this.extractOrgName(text, url),
-          domain: domain,
-          sourceUrl: url,
-          sourceType: 'SEARCH_RESULT',
-          discoveryReason: 'Technical footprint detected in public content',
-          rawIndicators: this.extractIndicators(text),
-          evidenceIds: []
-        } as any);
+      if (!url) continue;
+
+      try {
+        const domain = new URL(url).hostname.replace('www.', '');
+
+        if (this.isOrganizationSurface(text, url)) {
+          candidates.push({
+            organizationName: this.extractOrgName(text, url),
+            domain: domain,
+            sourceUrl: url,
+            sourceType: this.inferSourceType(url),
+            discoveryQuery: 'Autonomous Discovery',
+            discoveryReason: 'Technical surface identified',
+            provenance: 'Public Web Search'
+          });
+        }
+      } catch (e) {
+        continue;
       }
-    } catch (e) {
-      return [];
     }
 
     return candidates;
   }
 
-  private isTechnicalFootprint(text: string, url: string): boolean {
-    // Broad discovery: look for the presence of technical surfaces
-    const footprintKeywords = [
-      'engineering', 'blog', 'docs', 'api', 'infrastructure', 
-      'architecture', 'platform', 'developer', 'scaling', 'status'
+  private isOrganizationSurface(text: string, url: string): boolean {
+    const surfaceKeywords = [
+      'engineering', 'blog', 'docs', 'api', 'infrastructure',
+      'architecture', 'platform', 'developer', 'scaling', 'status',
+      'about', 'company', 'team', 'careers'
     ];
-    
-    const hasKeyword = footprintKeywords.some(k => text.includes(k));
-    const hasTechnicalUrl = /blog|docs|api|status|engineering/.test(url.toLowerCase());
-    
+
+    const hasKeyword = surfaceKeywords.some(k => text.includes(k));
+    const hasTechnicalUrl = /blog|docs|api|status|engineering|developer|about/.test(url.toLowerCase());
+
     return hasKeyword || hasTechnicalUrl;
   }
 
@@ -48,16 +59,14 @@ export class OrganizationCandidateExtractor {
     const domain = new URL(url).hostname.replace('www.', '');
     const parts = domain.split('.');
     if (parts.length < 2) return 'Unknown Org';
-    
-    // Use the first part of the domain and capitalize it
     return parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
   }
 
-  private extractIndicators(text: string): string[] {
-    const indicators = [
-      'engineering', 'blog', 'docs', 'api', 'infrastructure', 
-      'architecture', 'platform', 'developer', 'scaling', 'status'
-    ];
-    return indicators.filter(s => text.includes(s));
+  private inferSourceType(url: string): string {
+    if (url.includes('status')) return 'STATUS_PAGE';
+    if (url.includes('docs')) return 'DOCUMENTATION';
+    if (url.includes('api')) return 'API_ENDPOINT';
+    if (url.includes('blog')) return 'ENGINEERING_BLOG';
+    return 'OTHER_PUBLIC_SOURCE';
   }
 }

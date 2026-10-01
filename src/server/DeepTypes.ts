@@ -224,6 +224,22 @@ export interface DeepEmailDraft {
   blocked_reason?: string;
 }
 
+export interface DeepFinding {
+  /** Mirrors FindingClassification so it can drive the engine/ICP gate. */
+  finding_type: FindingType;
+  impact_severity: SeverityLevel;
+  severity_basis: string;
+  /** Public evidence backing the finding — IDs preserved end-to-end. */
+  evidence_ids: string[];
+  source_urls: string[];
+  provenance: EvidenceProvenance;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  strength: FindingStrength;
+  /** Plain-language explanation of why it qualifies (and what it does NOT claim). */
+  explanation: string;
+  recommendation: string;
+}
+
 // ── Dossier / decision ───────────────────────────────────────────────────────
 
 export type DeepDecision = 'OUTREACH_READY' | 'RESEARCH_MORE' | 'NO_GO';

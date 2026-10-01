@@ -177,7 +177,7 @@ export class XaviraOperator {
     if (!target || target.toLowerCase() === 'again') {
       if (target.toLowerCase() === 'again') {
         if (!this.surface) { this.println('No previous target. Run "research <url>" first.'); return null; }
-        urlToUse = this.surface.homepage;
+        urlToUse = this.surface.homepage || this.surface.company_homepage || "";
         this.println(`Re-running research for previous target: ${urlToUse}`);
       } else {
         this.println('Usage: research <company-url>   (or "research again")');
@@ -261,7 +261,7 @@ export class XaviraOperator {
     try {
       caseResult = await IntelligenceEngine.run(
         surface.company,
-        surface.homepage,
+        surface.homepage || surface.company_homepage || '',
         sel.candidate?.name || '',
         sel.candidate?.role || '',
         sel.ownerEvidenceString,

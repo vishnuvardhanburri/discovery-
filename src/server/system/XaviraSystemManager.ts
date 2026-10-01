@@ -252,7 +252,7 @@ export class XaviraSystemManager {
     }
     try {
       const results = await this.controller.searchProvider.search(query);
-      return results || [];
+      return results ? (results.results || []) : [];
     } catch (e: any) {
       console.error(`[SystemManager] Search failed for query "${query}": ${e.message}`);
       return [];

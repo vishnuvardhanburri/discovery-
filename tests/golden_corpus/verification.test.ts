@@ -178,12 +178,3 @@ describe('TargetVerificationEngine Golden Corpus', () => {
     expect(result.report.reason).toContain('Blind probing forbidden');
   });
 });
-Blind probing forbidden');
-  });
-});
-Blind probing forbidden');
-  });
-});
-Blind probing forbidden');
-  });
-});

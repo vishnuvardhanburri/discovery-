@@ -445,7 +445,7 @@ async function runAll(): Promise<void> {
 
     const ce = ledger.getCompanyEvidence('test-co.com');
     assertEq(ce.evidence.length, 6, 'ledger stores 6 provenance records');
-    const tags = new Set(ce.evidence.map(e => e.provenance));
+    const tags = new Set(ce.evidence.map(e => e.provenance_tag));
     for (const v of validOrigins) {
       assert(tags.has(v), `provenance tag preserved: ${v}`);
     }

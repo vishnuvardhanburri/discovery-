@@ -13,6 +13,7 @@
 import type { CanonicalCompany, CanonicalPerson, CanonicalContact, Provenance, SourceEntry, SourceCategory } from './Model';
 import type { ProviderCapabilities } from './ProviderInterface';
 import { CompanyDataProvider } from './ProviderInterface';
+import type { ProviderCostClass } from '../IntelligenceCase';
 import { CSVProvider, type CsvSchema, type CsvImportResult } from './CSVProvider';
 
 /**
@@ -44,6 +45,7 @@ export interface PublicDatasetOptions {
 }
 
 export class PublicDatasetProvider extends CompanyDataProvider {
+  readonly costClass: ProviderCostClass = 'FREE';
   readonly name = 'public-dataset';
   readonly enabled = true;
   readonly capabilities: ProviderCapabilities = {
