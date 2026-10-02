@@ -105,6 +105,11 @@ interface AdaptiveArtifact {
   artifact_path: string;
   error?: string;
   adaptive_investigation: any;
+  /** Entry Point Intelligence — full externally-observable technical perimeter. */
+  entry_points?: any[];
+  entry_point_telemetry?: any;
+  entry_point_graph?: any;
+  entry_point_changes?: any[];
 }
 
 function ensureRunDir(): void {
@@ -287,6 +292,14 @@ async function runCompanyWithTimeout(target: string, timeoutMs: number): Promise
 
     artifact.artifact_path = (prospect as any).artifact_path || '';
     artifact.terminal_state = { state: 'COMPLETED' };
+
+    // Entry Point Intelligence (ADDITIVE — does not affect canonical fields)
+    if ((prospect as any).entry_points) {
+      artifact.entry_points = (prospect as any).entry_points;
+      artifact.entry_point_telemetry = (prospect as any).entry_point_telemetry;
+      artifact.entry_point_graph = (prospect as any).entry_point_graph;
+      artifact.entry_point_changes = (prospect as any).entry_point_changes;
+    }
   } catch (e: any) {
     const completed = new Date().toISOString();
     artifact.terminal_state = { state: 'FAILED', reason: e.message };

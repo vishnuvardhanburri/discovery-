@@ -136,6 +136,7 @@ export interface ScoreBreakdown {
 export interface Evidence {
   id: string;
   company_id?: string;
+  entry_point_id?: string;
   provenance?: Provenance;
   evidence_origin: EvidenceOrigin;
   type?: EvidenceType;

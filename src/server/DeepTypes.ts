@@ -420,6 +420,24 @@ export interface DeepProspect {
     records: import('./AdaptiveInvestigationEngine').AdaptiveInvestigationRecord[];
     aggregate: import('./AdaptiveInvestigationEngine').AdaptiveInvestigationAggregate;
   };
+  /** Entry Point Intelligence — full externally-observable technical perimeter. */
+  entry_points?: import('./EntryPointModel').EntryPoint[];
+  /** Entry-point aggregate telemetry (coverage, attribution, verification rates). */
+  entry_point_telemetry?: import('./EntryPointModel').EntryPointTelemetry;
+  /** Entry-point relationship graph (directed, evidence-backed edges). */
+  entry_point_graph?: import('./EntryPointModel').EntryPointGraph;
+  /** Entry-point changes detected vs. prior run (empty array if no prior). */
+  entry_point_changes?: import('./EntryPointModel').EntryPointChange[];
+  /** Expected-behavior models generated for entry points (evidence-backed). */
+  expectations?: import('./findings/ProblemFinding').ExpectedBehavior[];
+  /** Behavioral differentials (expected vs. observed) for entry points. */
+  differentials?: import('./findings/ProblemFinding').BehaviorDifferential[];
+  /** Behavioral observations used for differential analysis. */
+  observations?: import('./findings/ProblemFinding').BehavioralObservation[];
+  /** Technical problem findings (verification-eligible surfaces, evidence-backed). */
+  technical_findings?: import('./findings/ProblemFinding').ProblemFinding[];
+  /** Investigation plans generated for entry points. */
+  investigation_plans?: import('./findings/ProblemFinding').InvestigationPlan[];
 }
 
 // ── Builder I/O ─�────────────────────────────────────────────────────────────

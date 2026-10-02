@@ -46,6 +46,22 @@ import { LiveWebResearchProvider } from './LiveWebResearchProvider';
 import { ChangeDetector, snapshotFromProspect } from './ChangeDetector';
 import { FreshnessEngine } from './FreshnessEngine';
 import { AdaptiveInvestigationEngine, type AdaptiveInvestigationOptions, type AdaptiveInvestigationRecord, type AdaptiveInvestigationAggregate, type AdaptiveInvestigationResult } from './AdaptiveInvestigationEngine';
+import { EntryPointDiscovery } from './EntryPointDiscovery';
+import { EntryPointGraphBuilder, attachRelationsToAnchors } from './EntryPointGraph';
+import { EntryPointChangeDetector } from './EntryPointChangeDetector';
+import { ExpectationEngine } from './ExpectationEngine';
+import { DifferentialFindingEngine } from './DifferentialFindingEngine';
+import { InvestigationPlanner } from './InvestigationPlanner';
+
+import type {
+  ExpectedBehavior,
+  BehavioralObservation,
+  BehaviorDifferential,
+  DifferentialState,
+  ProblemFinding,
+  InvestigationPlan,
+} from './findings/ProblemFinding';
+import { TechnicalProblemDetector, type ProblemDetectorOptions, type ProblemDetectionResult } from './TechnicalProblemDetector';
 
 /**
  * Language cues that an observation is *exposed without authentication*.
@@ -792,6 +808,143 @@ export class DeepProspectBuilder {
       }
     }
 
+    // ─── ENTRY POINT INTELLIGENCE (§ENTRY-POINT) ──────────────────────────
+    // Build the full externally-observable technical perimeter from evidence.
+    // This is EVIDENCE-BACKED — no hostnames are guessed.
+    this.onProgress?.('surface', 'Building entry-point intelligence from evidence.');
+
+    // Gather prior subdomains from state persistence for cross-source confirmation
+    const priorSubdomains = new Set<string>();
+    if (this.statePersistence) {
+      try {
+        const prior = this.statePersistence.load(parsed.hostname);
+        if (prior?.state_snapshot?.entry_points) {
+          for (const ep of prior.state_snapshot.entry_points) {
+            priorSubdomains.add(ep.hostname);
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    const epDiscovery = new EntryPointDiscovery({
+      organizationId: parsed.hostname,
+      canonicalDomain: parsed.hostname,
+      priorSubdomains,
+      includeAdaptive: !!adaptiveResult,
+    });
+
+    const entryPoints = epDiscovery.discover(caseRef.evidence, surface, signals);
+    const graphBuilder = new EntryPointGraphBuilder();
+    const epGraph = graphBuilder.build(entryPoints);
+    attachRelationsToAnchors(entryPoints, epGraph);
+
+    const epTelemetry = EntryPointChangeDetector.computeTelemetry(
+      entryPoints,
+      adaptiveResult?.aggregate.pivots_executed ?? 0,
+      entryPoints.filter(ep => ep.discovery_source.includes('ADAPTIVE_PIVOT')).length
+    );
+
+    // Detect changes vs. prior run
+    let epChanges: any[] = [];
+    if (this.statePersistence) {
+      try {
+        const prior = this.statePersistence.load(parsed.hostname);
+        if (prior?.state_snapshot?.entry_points) {
+          epChanges = EntryPointChangeDetector.detect(entryPoints, prior.state_snapshot.entry_points);
+          if (epChanges.length > 0) {
+            this.onProgress?.('surface', `Entry-point changes: ${epChanges.length} change(s) detected vs. prior run.`);
+            for (const ch of epChanges) {
+              this.onProgress?.('surface', `  ${ch.change_type}: ${ch.surface_url}`);
+            }
+          }
+        }
+      } catch (e: any) {
+        epChanges = [];
+      }
+    }
+
+    this.onProgress?.('surface', `Entry-point discovery complete: ${entryPoints.length} entry point(s), ${epTelemetry.total_attributed} attributed, ${epTelemetry.cross_source_confirmed} cross-source confirmed.`);
+
+    // ─── EXPECTED-BEHAVIOR + DIFFERENTIAL FINDING PIPELINE (§NEW) ─────────────
+    //  Target flow:
+    //  EntryPointDiscovery → EntryPointGraph → ExpectationEngine
+    //  → InvestigationPlanner → Public Observation → DifferentialFindingEngine
+    //  → TechnicalProblemDetector → Verification → ProblemFinding
+    //
+    //  This layer compares evidence-backed EXPECTED behavior against OBSERVED
+    //  behavior to determine if there is a meaningful, reproducible differential
+    //  that can advance to a verified finding.
+
+    let expectations: ExpectedBehavior[] = [];
+    let observations: BehavioralObservation[] = [];
+    let differentials: BehaviorDifferential[] = [];
+    let technicalFindings: ProblemFinding[] = [];
+    let investigationPlans: InvestigationPlan[] = [];
+
+    try {
+      // Step 1: Generate evidence-backed expectations for all entry points
+      const expectationEngine = new ExpectationEngine();
+      expectations = expectationEngine.generate(entryPoints, caseRef.evidence, epGraph);
+      this.onProgress?.('verification', `ExpectationEngine: ${expectations.length} expected-behavior model(s) generated.`);
+
+      // Step 2: Build behavioral observations from evidence (synthesized)
+      //         and synthesize investigation plans
+      const planner = new InvestigationPlanner();
+      observations = [];
+      investigationPlans = [];
+      for (const ep of entryPoints) {
+        // Build observations from evidence records that were tested without auth
+        for (const eid of ep.evidence_ids) {
+          const ev = caseRef.evidence.find(e => e.id === eid);
+          if (ev && ev.tested_without_auth) {
+            const obs = InvestigationPlanner.observationFromEvidence(ev, ep.entry_point_id);
+            if (obs) observations.push(obs);
+          }
+        }
+
+        // Synthesize investigation plans for verification-eligible surfaces
+        if (ep.verification_eligibility.eligible) {
+          const planResult = planner.plan({
+            entryPoint: ep,
+            allEntryPoints: entryPoints,
+            graph: epGraph,
+            expectations: expectations.filter(e => e.entry_point_id === ep.entry_point_id),
+            observations: observations.filter(o => o.entry_point_id === ep.entry_point_id),
+            evidence: caseRef.evidence,
+            differentialState: observations.some(o => o.entry_point_id === ep.entry_point_id) ? 'INSUFFICIENT_EVIDENCE' : null,
+          });
+          if (planResult.plan && planResult.plan.action !== 'STOP') {
+            investigationPlans.push(planResult.plan);
+          }
+        }
+      }
+
+      // Step 3: Run differential analysis (expected vs observed behavior)
+      const differentialEngine = new DifferentialFindingEngine();
+      differentials = differentialEngine.analyze(expectations, observations);
+      const actionable = differentialEngine.filterActionable(differentials);
+      differentials = differentialEngine.deduplicate(differentials);
+      this.onProgress?.('verification', `DifferentialFindingEngine: ${differentials.length} differential(s), ${actionable.length} actionable.`);
+
+      // Step 4: Run TechnicalProblemDetector on the full pipeline
+      //         (uses expectations + differentials as context)
+      const problemDetector = new TechnicalProblemDetector({
+        maxFindingsPerEntryPoint: 3,
+        minSignalConfidence: 0.4,
+        minFindingConfidence: 0.6,
+      });
+      const detectionResult: ProblemDetectionResult = await problemDetector.detect(
+        entryPoints,
+        caseRef.evidence,
+        epGraph
+      );
+      technicalFindings = detectionResult.findings;
+      this.onProgress?.('verification', `TechnicalProblemDetector: ${technicalFindings.length} problem finding(s) (${detectionResult.stats.verified_findings} verified).`);
+    } catch (e: any) {
+      this.onProgress?.('verification', `Expected-behavior pipeline error: ${e?.message || String(e)}`);
+    }
+
+    // ─── PROSPECT ASSEMBLY ──────────────────────────────────────────────────
     const prospect: DeepProspect = {
       company: surface.company,
       domain: parsed.hostname,
@@ -836,6 +989,15 @@ export class DeepProspectBuilder {
       live_web_researched: liveWebResearched,
       changes: priorChanges,
       adaptive_investigation: adaptiveResult ?? { attempted: false, records: [], aggregate: { boundary_observations: 0, pivots_suggested: 0, pivots_executed: 0, alternate_surfaces_found: 0, new_evidence_found: 0, new_verification_targets: 0, verified_from_adaptive_path: 0, no_useful_result: 0 } },
+      entry_points: entryPoints,
+      entry_point_telemetry: epTelemetry,
+      entry_point_graph: epGraph,
+      entry_point_changes: epChanges,
+      expectations,
+      observations,
+      differentials,
+      technical_findings: technicalFindings,
+      investigation_plans: investigationPlans,
       artifact_path: '',
       audit_trail: auditTrail,
       case_ref: caseRef
